@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token Ledger</title>
+  <link rel="stylesheet" href="assets/app.css" />
+</head>
+<body class="dark-mode">
+  <div class="bg-glow"></div>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand">
+        <p class="eyebrow">Codex + Pi usage monitor</p>
+        <h1>Token Ledger</h1>
+        <p class="sub">A portable local dashboard for model usage, cached context, and API-equivalent cost.</p>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" class="primary">Refresh scan</button>
+        <button id="reloadBtn" class="ghost">Reload data</button>
+        <div id="status" class="status-pill">loading…</div>
+      </div>
+    </header>
+
+    <section class="stat-grid" id="cards"></section>
+
+    <section class="controls-panel">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input id="search" placeholder="Filter model, source, session, file…" />
+      </div>
+      <div class="filter-group">
+        <select id="sourceFilter"><option value="all">All sources</option></select>
+        <select id="modelFilter"><option value="all">All models</option></select>
+      </div>
+    </section>
+
+    <div class="main-grid">
+      <section class="chart-section">
+        <article class="viz-card">
+          <div class="card-header">
+            <h2>Cost by model</h2>
+            <span class="badge">Top 12</span>
+          </div>
+          <div id="modelBars" class="bars-container"></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="card-header">
+            <h2>Daily cost trend</h2>
+            <span class="badge">Last 30 days</span>
+          </div>
+          <div id="dayBars" class="bars-container compact"></div>
+        </article>
+      </section>
+
+      <section class="table-section">
+        <article class="viz-card">
+          <div class="card-header"><h2>Source distribution</h2></div>
+          <div id="sourceTable" class="table-wrap"></div>
+        </article>
+        
+        <article class="viz-card">
+          <div class="card-header"><h2>Pricing model</h2></div>
+          <div id="priceTable" class="table-wrap"></div>
+        </article>
+      </section>
+    </div>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Model usage details</h2></div>
+      <div id="modelTable" class="table-wrap"></div>
+    </section>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Recent High-Cost Events</h2></div>
+      <div id="eventTable" class="table-wrap"></div>
+    </section>
+
+    <footer class="system-meta">
+      <div class="meta-section">
+        <h3>Caveats</h3>
+        <ul id="caveats" class="caveat-list"></ul>
+      </div>
+      <div class="meta-section">
+        <h3>System Warnings</h3>
+        <pre id="warnings" class="warnings-log"></pre>
+      </div>
+    </footer>
+  </main>
+  <script src="assets/app.js"></script>
+</body>
+</html>

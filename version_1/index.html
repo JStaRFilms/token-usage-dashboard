@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token Ledger</title>
+  <link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Codex + Pi usage monitor</p>
+        <h1>Token Ledger</h1>
+        <p class="sub">A portable local dashboard for model usage, cached context, and API-equivalent cost.</p>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn">Refresh scan</button>
+        <button id="reloadBtn" class="ghost">Reload data</button>
+        <span id="status" class="status">loading…</span>
+      </div>
+    </header>
+
+    <section class="cards" id="cards"></section>
+
+    <section class="panel filters">
+      <input id="search" placeholder="Filter model, source, session, file…" />
+      <select id="sourceFilter"><option value="all">All sources</option></select>
+      <select id="modelFilter"><option value="all">All models</option></select>
+    </section>
+
+    <section class="grid two">
+      <article class="panel"><h2>Cost by model</h2><div id="modelBars" class="bars"></div></article>
+      <article class="panel"><h2>Daily cost trend</h2><div id="dayBars" class="bars compact"></div></article>
+    </section>
+
+    <section class="grid two">
+      <article class="panel"><h2>Sources</h2><div id="sourceTable"></div></article>
+      <article class="panel"><h2>Pricing assumptions</h2><div id="priceTable"></div></article>
+    </section>
+
+    <section class="panel">
+      <h2>Models</h2>
+      <div id="modelTable"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Highest cost sessions / calls</h2>
+      <div id="eventTable"></div>
+    </section>
+
+    <section class="panel notes">
+      <h2>Caveats</h2>
+      <ul id="caveats"></ul>
+      <details><summary>Warnings</summary><pre id="warnings"></pre></details>
+    </section>
+  </main>
+  <script src="assets/app.js"></script>
+</body>
+</html>
