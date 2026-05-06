@@ -15,7 +15,6 @@ The UI **Refresh scan** button works in server mode. If you open `index.html` di
 
 ```bash
 python scripts/refresh_usage.py
-python scripts\refresh_usage.py --serve
 ```
 
 ## Configure

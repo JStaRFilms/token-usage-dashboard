@@ -1,0 +1,15 @@
+{
+  "sources": {
+    "codex": "C:/Users/johno/.codex",
+    "pi_sessions": "C:/Users/johno/.pi/agent/sessions"
+  },
+  "output": {
+    "summary": "data/usage-summary.json",
+    "events": "data/usage-events.json"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "auto_refresh_minutes": 10
+  }
+}
