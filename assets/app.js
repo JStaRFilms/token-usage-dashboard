@@ -141,8 +141,8 @@ function render() {
   renderBars(
     'dayBars',
     group(rows, 'day')
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .slice(-30)
+      .sort((a, b) => b.key.localeCompare(a.key))
+      .slice(0, 30)
   );
 
   // Tables
