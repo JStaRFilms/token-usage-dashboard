@@ -1,7 +1,10 @@
 {
   "sources": {
     "codex": "C:/Users/johno/.codex",
-    "pi_sessions": "C:/Users/johno/.pi/agent/sessions"
+    "pi_sessions": "C:/Users/johno/.pi/agent/sessions",
+    "gemini": "C:/Users/johno/.gemini",
+    "project_discovery": "linked",
+    "project_roots": []
   },
   "output": {
     "summary": "data/usage-summary.json",

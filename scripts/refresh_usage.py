@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 import threading
@@ -25,6 +26,9 @@ DEFAULT_CONFIG = ROOT / "config.json"
 # USD per 1M tokens: input, cached input/cache read, output.
 # Reasoning output is included in output_tokens by Codex totals; kept separately for reporting only.
 PRICES = {
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
+    "gpt-5.6-sol": (5.00, 0.50, 30.00),
+    "gpt-5.6-terra": (2.00, 0.20, 12.00),
     "gpt-5.5": (5.00, 0.50, 30.00),
     "gpt-5.4": (2.50, 0.25, 15.00),
     "gpt-5.4-mini": (0.75, 0.075, 4.50),
@@ -42,11 +46,41 @@ PRICES = {
     "gpt-5-codex": (1.25, 0.125, 10.00),
     # Anthropic best-effort, used only when present in Pi logs.
     "claude-sonnet-4-6": (3.00, 0.30, 15.00),
+    # Google Gemini Developer API paid tier, per 1M text/image/video tokens.
+    "gemini-3.6-flash": (1.50, 0.15, 7.50),
+    "gemini-embedding-001": (0.15, 0.00, 0.00),
+    "gemini-3.1-pro-preview": (2.00, 0.20, 12.00),
+    "gemini-3-pro-preview": (2.00, 0.20, 12.00),
+    "gemini-3.5-flash": (1.50, 0.15, 9.00),
+    "gemini-3-flash-preview": (0.50, 0.05, 3.00),
+    "gemini-3-flash": (0.50, 0.05, 3.00),
+    "gemini-3-flash-a": (0.50, 0.05, 3.00),
+    "gemini-3-flash-b": (0.50, 0.05, 3.00),
+    "gemini-3-flash-agent": (0.50, 0.05, 3.00),
+    "gemini-2.5-pro": (1.25, 0.125, 10.00),
+    "gemini-2.5-flash": (0.30, 0.03, 2.50),
+    "gemini-2.0-flash": (0.10, 0.025, 0.40),
 }
 
 PRICE_NOTES = {
+    "gpt-5.6-luna": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $1.00 / $0.10 / $6.00 rate.",
+    "gpt-5.6-sol": "OpenAI standard short-context pricing; unchanged on July 30, 2026.",
+    "gpt-5.6-terra": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $2.50 / $0.25 / $15.00 rate.",
     "gpt-5.3-codex": "No public row supplied; priced as gpt-5.4-class estimate.",
     "claude-sonnet-4-6": "Best-effort Sonnet-class estimate, not from supplied OpenAI table.",
+    "gemini-3.6-flash": "Google Gemini API standard text/image/video rate.",
+    "gemini-embedding-001": "Google Gemini API text embedding input rate.",
+    "gemini-3.1-pro-preview": "Google Gemini API standard text/image/video rate; <=200K-context tier.",
+    "gemini-3-pro-preview": "Mapped to current Gemini 3.1 Pro Preview standard text/image/video rate; <=200K-context tier.",
+    "gemini-3.5-flash": "Google Gemini API standard text/image/video rate.",
+    "gemini-3-flash-preview": "Google Gemini API standard text/image/video rate.",
+    "gemini-3-flash": "Mapped to Gemini 3 Flash Preview standard text/image/video rate.",
+    "gemini-3-flash-a": "Internal Antigravity model id mapped to Gemini 3 Flash Preview standard text/image/video rate.",
+    "gemini-3-flash-b": "Internal Antigravity model id mapped to Gemini 3 Flash Preview standard text/image/video rate.",
+    "gemini-3-flash-agent": "Internal Antigravity model id mapped to Gemini 3 Flash Preview standard text/image/video rate.",
+    "gemini-2.5-pro": "Google Gemini API standard text/image/video rate; <=200K-context tier.",
+    "gemini-2.5-flash": "Google Gemini API standard text/image/video rate.",
+    "gemini-2.0-flash": "Google Gemini API standard text/image/video rate.",
 }
 
 SCAN_STATE = {"running": False, "last_started": None, "last_finished": None, "error": None}
@@ -66,16 +100,59 @@ def safe_json(line: str):
         return None
 
 
+def iter_text_lines(file: Path):
+    with file.open("r", encoding="utf-8", errors="ignore") as stream:
+        yield from stream
+
+
 def iso_day(ts: str | None) -> str:
     if not ts:
         return "unknown"
     return ts[:10]
 
 
-def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: int, input_includes_cache: bool) -> tuple[float | None, dict]:
-    price = PRICES.get(model)
+GPT_5_6_PRICE_CHANGE_DAY = "2026-07-30"
+LEGACY_GPT_5_6_PRICES = {
+    "gpt-5.6-luna": (1.00, 0.10, 6.00),
+    "gpt-5.6-terra": (2.50, 0.25, 15.00),
+}
+MODEL_ALIASES = {
+    "ar-gpt-5.6-luna": "gpt-5.6-luna",
+    "ar-gpt-5.6-sol": "gpt-5.6-sol",
+    "ar-gpt-5.6-terra": "gpt-5.6-terra",
+    "gemini-default": "gemini-3.5-flash",
+    "gemini-flash-latest": "gemini-3-flash-preview",
+    "gemini-pro-d": "gemini-3.1-pro-preview",
+    "gemini-3.5-pro": "gemini-3.1-pro-preview",
+    "gemini-3.6-flash-exp-b": "gemini-3.6-flash",
+    "gemini-3.6-flash-high": "gemini-3.6-flash",
+    "gemini-3.6-flash-low": "gemini-3.6-flash",
+}
+
+
+def canonical_model(model: str) -> str:
+    normalized = (model or "unknown").lower()
+    if normalized.startswith("antigravity/"):
+        normalized = normalized.removeprefix("antigravity/")
+    return MODEL_ALIASES.get(normalized, normalized)
+
+
+def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: int, input_includes_cache: bool, timestamp: str | None) -> tuple[float | None, dict]:
+    priced_as = canonical_model(model)
+    if priced_as.endswith(":free") or priced_as == "openrouter/free":
+        price = (0.0, 0.0, 0.0)
+        note = "Provider designates this model as free."
+    elif priced_as in LEGACY_GPT_5_6_PRICES and iso_day(timestamp) < GPT_5_6_PRICE_CHANGE_DAY:
+        price = LEGACY_GPT_5_6_PRICES[priced_as]
+        note = f"Legacy OpenAI rate before {GPT_5_6_PRICE_CHANGE_DAY}."
+    else:
+        price = PRICES.get(priced_as)
+        note = PRICE_NOTES.get(priced_as)
+    if priced_as != (model or "unknown").lower():
+        mapping_note = f"Mapped from {model} to {priced_as}."
+        note = f"{note} {mapping_note}" if note else mapping_note
     if not price:
-        return None, {"known": False, "note": "Unknown price"}
+        return None, {"known": False, "note": "Unknown price", "priced_as": priced_as}
     in_rate, cache_rate, out_rate = price
     non_cached = max(input_tokens - cached_tokens, 0) if input_includes_cache else input_tokens
     cost_input = non_cached * in_rate / 1_000_000
@@ -90,12 +167,13 @@ def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: 
         "cost_input": cost_input,
         "cost_cache": cost_cache,
         "cost_output": cost_output,
-        "note": PRICE_NOTES.get(model),
+        "note": note,
+        "priced_as": priced_as,
     }
 
 
 def event(source, file, timestamp, session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, input_includes_cache, granularity):
-    cost, price = calc_cost(model or "unknown", input_tokens, cached_tokens, output_tokens, input_includes_cache)
+    cost, price = calc_cost(model or "unknown", input_tokens, cached_tokens, output_tokens, input_includes_cache, timestamp)
     return {
         "source": source,
         "file": str(file),
@@ -117,13 +195,14 @@ def event(source, file, timestamp, session_id, model, input_tokens, cached_token
 
 def scan_codex(root: Path) -> tuple[list[dict], list[str]]:
     events, warnings = [], []
+    usage_keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
     if not root.exists():
         return events, [f"Codex path missing: {root}"]
     for file in root.rglob("*.jsonl"):
         current_model, session_id = "unknown", file.stem
-        last_total = None
+        previous_usage: dict[str, int] | None = None
         try:
-            for line in file.open("r", encoding="utf-8", errors="ignore"):
+            for line in iter_text_lines(file):
                 obj = safe_json(line)
                 if not isinstance(obj, dict):
                     continue
@@ -136,49 +215,63 @@ def scan_codex(root: Path) -> tuple[list[dict], list[str]]:
                     current_model = payload.get("model") or current_model
                 elif typ == "event_msg" and payload.get("type") == "token_count":
                     info = payload.get("info")
-                    if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
-                        last_total = (obj.get("timestamp"), session_id, current_model, info["total_token_usage"])
+                    if not isinstance(info, dict) or not isinstance(info.get("total_token_usage"), dict):
+                        continue
+                    usage = {key: as_int(info["total_token_usage"].get(key)) for key in usage_keys}
+                    if previous_usage is None:
+                        delta = usage
+                    elif any(usage[key] < previous_usage[key] for key in usage_keys):
+                        warnings.append(f"Codex cumulative usage reset: {file}")
+                        delta = usage
+                    else:
+                        delta = {key: usage[key] - previous_usage[key] for key in usage_keys}
+                    previous_usage = usage
+                    if not any(delta[key] for key in usage_keys):
+                        continue
+                    events.append(event(
+                        "codex", file, obj.get("timestamp"), session_id, current_model,
+                        delta["input_tokens"],
+                        delta["cached_input_tokens"],
+                        delta["output_tokens"],
+                        delta["reasoning_output_tokens"],
+                        delta["total_tokens"],
+                        True,
+                        "usage-delta",
+                    ))
         except Exception as e:
             warnings.append(f"Codex parse failed: {file}: {e}")
-        if last_total:
-            ts, sid, model, u = last_total
-            events.append(event(
-                "codex", file, ts, sid, model,
-                int(u.get("input_tokens", 0) or 0),
-                int(u.get("cached_input_tokens", 0) or 0),
-                int(u.get("output_tokens", 0) or 0),
-                int(u.get("reasoning_output_tokens", 0) or 0),
-                int(u.get("total_tokens", 0) or 0),
-                True,
-                "session-final-cumulative",
-            ))
     return events, warnings
 
 
-def scan_pi(root: Path) -> tuple[list[dict], list[str]]:
-    events, warnings = [], []
+def scan_pi(root: Path, source_name: str = "pi") -> tuple[list[dict], list[str], set[str]]:
+    events, warnings, cwds = [], [], set()
     if not root.exists():
-        return events, [f"Pi sessions path missing: {root}"]
+        return events, [f"Pi sessions path missing: {root}"], cwds
     for file in root.rglob("*.jsonl"):
-        provider, model, session_id = "unknown", "unknown", file.stem
+        provider, model, session_id, cwd = "unknown", "unknown", file.stem, ""
         try:
-            for line in file.open("r", encoding="utf-8", errors="ignore"):
+            for line in iter_text_lines(file):
                 obj = safe_json(line)
                 if not isinstance(obj, dict):
                     continue
                 typ = obj.get("type")
                 if typ == "session":
                     session_id = obj.get("id") or session_id
+                    cwd = obj.get("cwd") or cwd
+                    if cwd:
+                        cwds.add(cwd)
                 elif typ == "model_change":
                     provider = obj.get("provider") or provider
                     model = obj.get("modelId") or model
                 elif typ == "message":
                     msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                    provider = msg.get("provider") or msg.get("api") or provider
+                    model = msg.get("model") or msg.get("modelId") or model
                     u = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
                     if u:
                         # Pi usage has input + cacheRead as separate additive fields in observed logs.
                         events.append(event(
-                            "pi", file, obj.get("timestamp"), session_id, model,
+                            source_name, file, obj.get("timestamp"), session_id, model,
                             int(u.get("input", 0) or 0),
                             int(u.get("cacheRead", 0) or 0),
                             int(u.get("output", 0) or 0),
@@ -186,16 +279,375 @@ def scan_pi(root: Path) -> tuple[list[dict], list[str]]:
                             int(u.get("totalTokens", 0) or 0),
                             False,
                             "model-call",
-                        ) | {"provider": provider})
+                        ) | {"provider": provider, "cwd": cwd})
         except Exception as e:
             warnings.append(f"Pi parse failed: {file}: {e}")
+    return events, warnings, cwds
+
+
+def as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def iter_gemini_chat_files(root: Path):
+    """Yield Gemini CLI chat JSON/JSONL files without scanning browser caches or project snapshots."""
+    base = root / "tmp"
+    if not base.exists():
+        return
+    skip_dirs = {".git", "node_modules", "tool-outputs", "antigravity-browser-profile"}
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.endswith("Cache")]
+        current = Path(dirpath)
+        if current.name != "chats":
+            continue
+        for name in filenames:
+            if Path(name).suffix.lower() in {".json", ".jsonl"}:
+                yield current / name
+        dirnames[:] = []
+
+
+def read_gemini_chat_objects(file: Path) -> list[dict]:
+    if file.suffix.lower() == ".jsonl":
+        objects: list[dict] = []
+        for line in iter_text_lines(file):
+            obj = safe_json(line)
+            if isinstance(obj, dict):
+                objects.append(obj)
+        return objects
+    with file.open("r", encoding="utf-8", errors="ignore") as f:
+        obj = json.load(f)
+    if isinstance(obj, list):
+        return [x for x in obj if isinstance(x, dict)]
+    if isinstance(obj, dict):
+        messages = obj.get("messages")
+        if isinstance(messages, list):
+            return [obj] + [x for x in messages if isinstance(x, dict)]
+        return [obj]
+    return []
+
+
+def find_gemini_token_records(obj: dict, ancestors: list[dict] | None = None):
+    ancestors = ancestors or []
+    if not isinstance(obj, dict):
+        return
+    tokens = obj.get("tokens")
+    if isinstance(tokens, dict) and any(k in tokens for k in ("input", "output", "cached", "total")):
+        context: dict = {}
+        # Prefer the innermost message fields, then fall back to file/session metadata.
+        for src in [obj] + list(reversed(ancestors)):
+            for key in ("id", "timestamp", "model", "type", "sessionId", "startTime", "lastUpdated", "kind"):
+                if key in src and key not in context:
+                    context[key] = src[key]
+        yield context, tokens
+    for value in obj.values():
+        if isinstance(value, dict):
+            yield from find_gemini_token_records(value, ancestors + [obj])
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    yield from find_gemini_token_records(item, ancestors + [obj])
+
+
+def scan_gemini(root: Path) -> tuple[list[dict], list[str]]:
+    """Scan local Gemini CLI chat histories for explicit token metadata.
+
+    Gemini CLI stores token counts as message-level `tokens` dictionaries. In JSONL
+    histories, a message may be rewritten as tool-call details arrive, so records are
+    de-duplicated by file + message id and the latest copy wins.
+    """
+    events, warnings = [], []
+    if not root.exists():
+        return events, [f"Gemini path missing: {root}"]
+    for file in iter_gemini_chat_files(root) or []:
+        try:
+            objects = read_gemini_chat_objects(file)
+            session_meta: dict = {}
+            per_message: dict[str, dict] = {}
+            for obj in objects:
+                if "sessionId" in obj or "startTime" in obj:
+                    session_meta.update({k: obj.get(k) for k in ("sessionId", "startTime", "lastUpdated", "kind") if obj.get(k)})
+                for context, tokens in find_gemini_token_records(obj):
+                    merged = {**session_meta, **context}
+                    message_id = str(merged.get("id") or f"{len(per_message)}")
+                    session_id = str(merged.get("sessionId") or file.stem)
+                    timestamp = merged.get("timestamp") or merged.get("lastUpdated") or merged.get("startTime")
+                    model = str(merged.get("model") or "unknown")
+                    ev = event(
+                        "gemini-cli", file, timestamp, session_id, model,
+                        as_int(tokens.get("input")),
+                        as_int(tokens.get("cached")),
+                        as_int(tokens.get("output")),
+                        as_int(tokens.get("thoughts")),
+                        as_int(tokens.get("total")),
+                        True,
+                        "model-call",
+                    ) | {
+                        "provider": "google",
+                        "message_id": message_id,
+                        "gemini_tool_tokens": as_int(tokens.get("tool")),
+                    }
+                    per_message[message_id] = ev
+            events.extend(per_message.values())
+        except Exception as e:
+            warnings.append(f"Gemini parse failed: {file}: {e}")
     return events, warnings
+
+
+def proto_read_varint(buf: bytes, pos: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    start = pos
+    while pos < len(buf) and pos - start < 10:
+        byte = buf[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+    raise ValueError("invalid varint")
+
+
+def proto_len_fields(buf: bytes) -> dict[int, list[bytes]]:
+    fields: dict[int, list[bytes]] = defaultdict(list)
+    pos = 0
+    while pos < len(buf):
+        try:
+            key, pos = proto_read_varint(buf, pos)
+        except Exception:
+            break
+        field = key >> 3
+        wire = key & 7
+        if wire == 0:
+            try:
+                _value, pos = proto_read_varint(buf, pos)
+            except Exception:
+                break
+        elif wire == 1:
+            pos += 8
+        elif wire == 2:
+            try:
+                size, pos = proto_read_varint(buf, pos)
+            except Exception:
+                break
+            data = buf[pos:pos + size]
+            pos += size
+            fields[field].append(data)
+        elif wire == 5:
+            pos += 4
+        else:
+            break
+    return fields
+
+
+def proto_int_fields(buf: bytes) -> dict[int, list[int]]:
+    fields: dict[int, list[int]] = defaultdict(list)
+    pos = 0
+    while pos < len(buf):
+        try:
+            key, pos = proto_read_varint(buf, pos)
+        except Exception:
+            break
+        field = key >> 3
+        wire = key & 7
+        if wire == 0:
+            try:
+                value, pos = proto_read_varint(buf, pos)
+            except Exception:
+                break
+            fields[field].append(value)
+        elif wire == 1:
+            pos += 8
+        elif wire == 2:
+            try:
+                size, pos = proto_read_varint(buf, pos)
+            except Exception:
+                break
+            pos += size
+        elif wire == 5:
+            pos += 4
+        else:
+            break
+    return fields
+
+
+def antigravity_model_from_blob(blob: bytes) -> str | None:
+    matches = [m.decode("utf-8", "ignore") for m in __import__("re").findall(rb"gemini-[A-Za-z0-9_.-]+", blob)]
+    matches = [
+        model for model in matches
+        if not model.endswith((".json", ".md", ".html"))
+        and "companion" not in model
+        and model not in {"gemini-cli", "gemini-cli-latest", "gemini-compatibility", "gemini-stats"}
+    ]
+    return matches[0] if matches else None
+
+
+def antigravity_event_time(file: Path) -> str:
+    return datetime.fromtimestamp(file.stat().st_mtime, timezone.utc).isoformat()
+
+
+def extract_antigravity_usage(blob: bytes) -> tuple[str, dict] | None:
+    """Best-effort decode of Antigravity sqlite gen_metadata protobuf blobs.
+
+    The observed shape stores Gemini usage counters under top-level field 1,
+    nested field 4. The mapping matches Google usage metadata layout used by
+    Antigravity: field1 non-cached prompt, field2 cached prompt, field3 output,
+    field9 thinking, and field10 tool-use prompt tokens.
+    """
+    top = proto_len_fields(blob)
+    gen_parts = top.get(1) or []
+    if not gen_parts:
+        return None
+    gen = gen_parts[0]
+    model = antigravity_model_from_blob(gen) or antigravity_model_from_blob(blob) or "unknown"
+    usage_parts = proto_len_fields(gen).get(4) or []
+    if not usage_parts:
+        return None
+    ints = proto_int_fields(usage_parts[0])
+    non_cached_input = (ints.get(1) or [0])[0]
+    cached_input = (ints.get(2) or [0])[0]
+    output = (ints.get(3) or [0])[0]
+    thoughts = (ints.get(9) or [0])[0]
+    tool = (ints.get(10) or [0])[0]
+    # Ignore rows that do not look like usage. Internal counters can share the same protobuf encoding.
+    if non_cached_input <= 0 and cached_input <= 0 and output <= 0 and thoughts <= 0 and tool <= 0:
+        return None
+    total = non_cached_input + cached_input + output + thoughts + tool
+    return model, {
+        "input": non_cached_input + cached_input,
+        "cached": cached_input,
+        "output": output,
+        "thoughts": thoughts,
+        "tool": tool,
+        "total": total,
+    }
+
+
+def scan_antigravity_dbs(root: Path) -> tuple[list[dict], list[str], dict]:
+    events, warnings = [], []
+    stats = {"db_files": 0, "duplicate_rows_skipped": 0, "pb_files_not_decoded": 0}
+    if not root.exists():
+        return events, [f"Gemini path missing for Antigravity scan: {root}"], stats
+    stores = [
+        ("antigravity-cli", root / "antigravity-cli" / "conversations"),
+        ("antigravity-ide", root / "antigravity-ide" / "conversations"),
+        ("antigravity-app", root / "antigravity" / "conversations"),
+    ]
+    seen: set[tuple] = set()
+    for source_name, conv_dir in stores:
+        if not conv_dir.exists():
+            continue
+        stats["pb_files_not_decoded"] += len(list(conv_dir.glob("*.pb")))
+        for file in conv_dir.glob("*.db"):
+            if file.name.endswith(("-wal", "-shm")):
+                continue
+            stats["db_files"] += 1
+            try:
+                con = sqlite3.connect(f"file:{file}?mode=ro&immutable=1", uri=True)
+                rows = con.execute("select idx, data from gen_metadata where data is not null").fetchall()
+                con.close()
+            except Exception as e:
+                warnings.append(f"Antigravity DB parse failed: {file}: {e}")
+                continue
+            timestamp = antigravity_event_time(file)
+            session_id = file.stem
+            for idx, blob in rows:
+                if not isinstance(blob, bytes):
+                    continue
+                decoded = extract_antigravity_usage(blob)
+                if not decoded:
+                    continue
+                model, tokens = decoded
+                dedupe_key = (session_id, idx, model, tokens["input"], tokens["cached"], tokens["output"], tokens["thoughts"], tokens["tool"])
+                if dedupe_key in seen:
+                    stats["duplicate_rows_skipped"] += 1
+                    continue
+                seen.add(dedupe_key)
+                events.append(event(
+                    source_name, file, timestamp, session_id, model,
+                    tokens["input"], tokens["cached"], tokens["output"], tokens["thoughts"], tokens["total"],
+                    True,
+                    "antigravity-gen-metadata",
+                ) | {
+                    "provider": "google",
+                    "message_id": f"{session_id}:{idx}",
+                    "gemini_tool_tokens": tokens["tool"],
+                    "antigravity_usage_decode": "best-effort-sqlite-gen-metadata",
+                })
+    return events, warnings, stats
+
+
+def source_group(source: str) -> str:
+    if source == "codex":
+        return "codex"
+    if source.startswith("pi"):
+        return "takomi/pi"
+    if source.startswith("antigravity") or source == "gemini-cli":
+        return "antigravity"
+    return source
+
+
+def normalize_source_groups(events: list[dict]) -> None:
+    for e in events:
+        detailed = e.get("source") or "unknown"
+        e["source_detail"] = detailed
+        e["source_group"] = source_group(detailed)
+
+
+def add_project_pi_root(found: list[Path], seen: set[str], root: Path):
+    key = str(root.resolve()).lower()
+    if key not in seen:
+        seen.add(key)
+        found.append(root)
+
+
+def discover_linked_project_pi_roots(cwds: set[str]) -> tuple[list[Path], list[str]]:
+    """Follow global Pi session cwd metadata back to project-local Pi/Takomi histories."""
+    found: list[Path] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for raw in sorted(cwds or []):
+        cwd = Path(raw)
+        if not cwd.exists():
+            continue
+        for candidate in (cwd / ".pi" / "takomi", cwd / ".pi" / "agent" / "sessions"):
+            if candidate.exists():
+                add_project_pi_root(found, seen, candidate)
+    return found, warnings
+
+
+def discover_project_pi_roots(project_roots: list[str]) -> tuple[list[Path], list[str]]:
+    """Fallback: find project-local Pi history folders under explicit roots."""
+    found: list[Path] = []
+    warnings: list[str] = []
+    skip = {"node_modules", ".git", ".next", "dist", "build", "venv", ".venv", ".turbo"}
+    seen: set[str] = set()
+    for raw in project_roots or []:
+        root = Path(raw)
+        if not root.exists():
+            warnings.append(f"Project root missing: {root}")
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in skip]
+            p = Path(dirpath)
+            # The common project-local Takomi history location.
+            if p.name == "takomi" and p.parent.name == ".pi":
+                add_project_pi_root(found, seen, p)
+                dirnames[:] = []
+            # A less common project-local session location, if present.
+            elif p.name == "sessions" and p.parent.name == "agent" and p.parent.parent.name == ".pi":
+                add_project_pi_root(found, seen, p)
+                dirnames[:] = []
+    return found, warnings
 
 
 def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
     totals = Counter()
     by_model = defaultdict(Counter)
     by_source = defaultdict(Counter)
+    by_source_detail = defaultdict(Counter)
     by_day = defaultdict(Counter)
     by_session = defaultdict(Counter)
     unknown_models = Counter()
@@ -205,19 +657,22 @@ def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
         for k in keys:
             totals[k] += e[k]
             by_model[e["model"]][k] += e[k]
-            by_source[e["source"]][k] += e[k]
+            by_source[e.get("source_group", e["source"])][k] += e[k]
+            by_source_detail[e["source"]][k] += e[k]
             by_day[e["day"]][k] += e[k]
             by_session[e["session_id"]][k] += e[k]
         if e["estimated_cost_usd"] is not None:
             totals["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_model[e["model"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
-            by_source[e["source"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_source[e.get("source_group", e["source"])]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_source_detail[e["source"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_day[e["day"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_session[e["session_id"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
         else:
             unknown_models[e["model"]] += 1
         by_model[e["model"]]["events"] += 1
-        by_source[e["source"]]["events"] += 1
+        by_source[e.get("source_group", e["source"])]["events"] += 1
+        by_source_detail[e["source"]]["events"] += 1
         by_day[e["day"]]["events"] += 1
         by_session[e["session_id"]]["events"] += 1
 
@@ -235,6 +690,7 @@ def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
         "totals": dict(totals),
         "by_model": rows(by_model),
         "by_source": rows(by_source),
+        "by_source_detail": rows(by_source_detail),
         "by_day": sorted(rows(by_day), key=lambda r: r["key"]),
         "by_session": rows(by_session)[:250],
         "high_cost_events": high,
@@ -243,9 +699,14 @@ def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
         "price_table": {k: {"input": v[0], "cached": v[1], "output": v[2], "note": PRICE_NOTES.get(k)} for k, v in PRICES.items()},
         "warnings": warnings[:200],
         "caveats": [
-            "Codex input_tokens include cached_input_tokens; dashboard subtracts cached before applying input rates.",
+            "Codex input_tokens include cached_input_tokens; dashboard subtracts cached before applying input rates and converts cumulative snapshots into timestamped deltas.",
             "Pi input/cacheRead are additive in observed logs; dashboard does not subtract cacheRead from input.",
+            "Gemini/Antigravity cached tokens are treated as part of input, so dashboard subtracts cache before pricing.",
+            "Antigravity sqlite gen_metadata usage is decoded best-effort; legacy .pb conversation blobs are counted as not decoded. SQLite metadata does not expose per-record timestamps, so its events use the database modification time.",
             "Only explicit runtime usage metadata is counted. Raw transcript text is not re-tokenized.",
+            "Project-local Pi/Takomi histories are discovered by following cwd links from global Pi sessions by default; broad project root scans are opt-in.",
+            "Gemini pricing uses current Google Gemini API paid text/image/video rates; Pro models use the <=200K-context tier and internal aliases are mapped to their public equivalents where available.",
+            "GPT-5.6 Luna and Terra preserve the pre-July 30, 2026 OpenAI rates for earlier usage; Sol pricing is unchanged.",
             "gpt-5.3-codex has no supplied public price row and is estimated as gpt-5.4-class.",
         ],
     }
@@ -256,11 +717,57 @@ def refresh(config_path: Path = DEFAULT_CONFIG) -> dict:
     config = load_config(config_path)
     sources = config.get("sources", {})
     codex_events, codex_warn = scan_codex(Path(sources.get("codex", "")))
-    pi_events, pi_warn = scan_pi(Path(sources.get("pi_sessions", "")))
-    events = codex_events + pi_events
-    warnings = codex_warn + pi_warn
+    pi_root = Path(sources.get("pi_sessions", ""))
+    pi_events, pi_warn, pi_cwds = scan_pi(pi_root, "pi-global")
+    gemini_root = Path(sources.get("gemini", ""))
+    gemini_events, gemini_warn = scan_gemini(gemini_root) if sources.get("gemini") else ([], [])
+    antigravity_events, antigravity_warn, antigravity_stats = scan_antigravity_dbs(gemini_root) if sources.get("gemini") else ([], [], {})
+    project_pi_events: list[dict] = []
+    project_pi_warn: list[str] = []
+
+    # Default: linked discovery. Global Pi sessions already record cwd, so use
+    # those cwd values as privacy-friendly pointers to project-local .pi history.
+    discovery_mode = str(sources.get("project_discovery", "linked")).lower()
+    project_pi_roots: list[Path] = []
+    linked_roots, linked_warn = discover_linked_project_pi_roots(pi_cwds)
+    excluded_roots = {str(pi_root.resolve()).lower()} if pi_root.exists() else set()
+    linked_roots = [root for root in linked_roots if str(root.resolve()).lower() not in excluded_roots]
+    project_pi_roots.extend(linked_roots)
+
+    # Optional fallback for dashboards that intentionally want broad scanning.
+    root_roots: list[Path] = []
+    root_warn: list[str] = []
+    if discovery_mode in {"roots", "both"}:
+        root_roots, root_warn = discover_project_pi_roots(sources.get("project_roots", []))
+        project_pi_roots.extend(root_roots)
+    elif sources.get("project_roots"):
+        root_warn.append("project_roots configured but skipped; set sources.project_discovery to 'roots' or 'both' to scan broad roots.")
+
+    seen_roots: set[str] = set()
+    unique_project_pi_roots = []
+    for root in project_pi_roots:
+        key = str(root.resolve()).lower()
+        if key not in seen_roots:
+            seen_roots.add(key)
+            unique_project_pi_roots.append(root)
+
+    for root in unique_project_pi_roots:
+        ev, warn, _cwds = scan_pi(root, "pi-project-linked" if root in linked_roots else "pi-project")
+        project_pi_events.extend(ev)
+        project_pi_warn.extend(warn)
+    events = codex_events + pi_events + gemini_events + antigravity_events + project_pi_events
+    normalize_source_groups(events)
+    warnings = codex_warn + pi_warn + gemini_warn + antigravity_warn + linked_warn + root_warn + project_pi_warn
     summary = aggregate(events, warnings, started)
     summary["config"] = config
+    summary["discovered_project_pi_roots"] = [str(p) for p in unique_project_pi_roots]
+    summary["project_discovery"] = {
+        "mode": discovery_mode,
+        "linked_roots": [str(p) for p in linked_roots],
+        "broad_roots": [str(p) for p in root_roots],
+        "global_session_cwds": len(pi_cwds),
+    }
+    summary["antigravity_scan"] = antigravity_stats
 
     out_summary = ROOT / config.get("output", {}).get("summary", "data/usage-summary.json")
     out_events = ROOT / config.get("output", {}).get("events", "data/usage-events.json")

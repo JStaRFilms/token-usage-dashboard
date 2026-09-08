@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Token Ledger — Usage Monitor</title>
-  <meta name="description" content="Portable local dashboard for Codex and Pi model usage, cached context, and API-equivalent cost tracking." />
+  <meta name="description" content="Portable local dashboard for Takomi/Pi, Codex, and Antigravity model usage, cached context, and API-equivalent cost tracking." />
   <link rel="stylesheet" href="assets/app.css" />
 </head>
 <body>
@@ -12,7 +12,7 @@
   <main class="shell">
     <header class="hero">
       <div class="brand">
-        <p class="eyebrow">Codex + Pi usage monitor</p>
+        <p class="eyebrow">Takomi/Pi + Codex + Antigravity monitor</p>
         <h1>Token Ledger</h1>
         <p class="sub">Portable local dashboard for model usage, cached context, and API-equivalent cost.</p>
       </div>
@@ -74,7 +74,12 @@
     </section>
 
     <section class="viz-card full-width">
-      <div class="card-header"><h2>Recent High-Cost Events</h2></div>
+      <div class="card-header"><h2>Highest Estimated-Cost Sessions</h2></div>
+      <div id="sessionTable" class="table-wrap"></div>
+    </section>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Largest Raw Usage Records</h2></div>
       <div id="eventTable" class="table-wrap"></div>
     </section>
 

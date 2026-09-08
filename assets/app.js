@@ -16,6 +16,8 @@ const money = (n) =>
       });
 const num = (n) => Number(n || 0).toLocaleString();
 const short = (s) => (s || '').replace(/^.*[\\/]/, '');
+const sourceKey = (e) => e.source_group || e.source || 'unknown';
+const sourceDetail = (e) => e.source_detail || e.source || 'unknown';
 
 /* ─── Data Loading ─── */
 async function loadData() {
@@ -40,7 +42,7 @@ async function loadData() {
 
 /* ─── Filters ─── */
 function populateFilters() {
-  const sources = [...new Set(events.map((e) => e.source))].sort();
+  const sources = [...new Set(events.map(sourceKey))].sort();
   const models = [...new Set(events.map((e) => e.model))].sort();
   if ($('sourceFilter').options.length <= 1) {
     $('sourceFilter').innerHTML =
@@ -58,10 +60,10 @@ function filteredEvents() {
   const model = $('modelFilter').value;
   return events.filter(
     (e) =>
-      (src === 'all' || e.source === src) &&
+      (src === 'all' || sourceKey(e) === src) &&
       (model === 'all' || e.model === model) &&
       (!q ||
-        JSON.stringify([e.model, e.source, e.session_id, e.file])
+        JSON.stringify([e.model, sourceKey(e), sourceDetail(e), e.session_id, e.file])
           .toLowerCase()
           .includes(q))
   );
@@ -87,7 +89,7 @@ function sumRows(rows) {
 function group(rows, key) {
   const m = new Map();
   for (const e of rows) {
-    const k = e[key] || 'unknown';
+    const k = key === 'source_group' ? sourceKey(e) : e[key] || 'unknown';
     if (!m.has(k))
       m.set(k, { key: k, cost: 0, input: 0, cache: 0, output: 0, total: 0, events: 0 });
     const r = m.get(k);
@@ -97,6 +99,55 @@ function group(rows, key) {
     r.output += e.output_tokens || 0;
     r.total += e.total_tokens || 0;
     r.events++;
+  }
+  return [...m.values()];
+}
+
+function groupSessions(rows) {
+  const m = new Map();
+  for (const e of rows) {
+    const source = sourceKey(e);
+    const session = e.session_id || 'unknown';
+    const k = `${source}::${session}`;
+    if (!m.has(k)) {
+      m.set(k, {
+        key: session,
+        source,
+        session,
+        day: e.day || '',
+        lastDay: e.day || '',
+        model: e.model || 'unknown',
+        modelCosts: new Map(),
+        cost: 0,
+        total: 0,
+        input: 0,
+        cache: 0,
+        output: 0,
+        events: 0,
+        file: e.file || '',
+        maxEventCost: 0,
+      });
+    }
+    const r = m.get(k);
+    const cost = e.estimated_cost_usd || 0;
+    r.cost += cost;
+    r.input += e.input_tokens || 0;
+    r.cache += e.cached_input_tokens || 0;
+    r.output += e.output_tokens || 0;
+    r.total += e.total_tokens || 0;
+    r.events++;
+    if (e.day && (!r.day || e.day < r.day)) r.day = e.day;
+    if (e.day && (!r.lastDay || e.day > r.lastDay)) r.lastDay = e.day;
+    const model = e.model || 'unknown';
+    r.modelCosts.set(model, (r.modelCosts.get(model) || 0) + cost);
+    if (cost >= r.maxEventCost) {
+      r.maxEventCost = cost;
+      r.file = e.file || r.file;
+    }
+  }
+  for (const r of m.values()) {
+    r.model = [...r.modelCosts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || r.model;
+    delete r.modelCosts;
   }
   return [...m.values()];
 }
@@ -148,13 +199,19 @@ function render() {
   // Tables
   renderTable(
     'sourceTable',
-    group(rows, 'source').sort((a, b) => b.cost - a.cost),
+    group(rows, 'source_group').sort((a, b) => b.cost - a.cost),
     ['Key', 'Cost', 'Tokens', 'Rows']
   );
   renderTable(
     'modelTable',
     group(rows, 'model').sort((a, b) => b.cost - a.cost),
     ['Model', 'Cost', 'Total', 'Input', 'Cache', 'Output', 'Calls']
+  );
+
+  renderSessions(
+    groupSessions(rows)
+      .sort((a, b) => b.cost - a.cost)
+      .slice(0, 120)
   );
 
   renderEvents(
@@ -275,13 +332,68 @@ function renderTable(id, rows, headers) {
   });
 }
 
+/* ─── Sessions Table (sortable) ─── */
+function renderSessions(rows) {
+  const id = 'sessionTable';
+  const headers = ['When', 'Source', 'Top Model', 'Est. Cost', 'Tokens', 'Calls', 'Session / File'];
+  const fieldExtract = [
+    (r) => r.lastDay || r.day || '',
+    (r) => r.source || '',
+    (r) => r.model || '',
+    (r) => r.cost || 0,
+    (r) => r.total || 0,
+    (r) => r.events || 0,
+    (r) => r.session || '',
+  ];
+
+  const s = sortState[id];
+  if (s) {
+    const extract = fieldExtract[s.col];
+    rows = sortRows(rows, s.col, s.dir, (r) => extract(r));
+  }
+
+  $(id).innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          ${headers.map((h, i) => `<th data-table="${id}" data-col="${i}">${h}${sortArrow(id, i)}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map(
+            (r) => `
+          <tr>
+            <td style="white-space:nowrap">${r.lastDay || r.day}</td>
+            <td><span class="pill">${r.source}</span></td>
+            <td><code>${r.model}</code></td>
+            <td style="color:var(--ember);font-weight:600">${money(r.cost)}</td>
+            <td>${num(r.total)}</td>
+            <td>${num(r.events)}</td>
+            <td><div class="stat-hint" title="${r.session}\n${r.file}">${short(r.session) || short(r.file)}</div></td>
+          </tr>
+        `
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+
+  $(id).querySelectorAll('th[data-table]').forEach((th) => {
+    th.addEventListener('click', () => {
+      toggleSort(th.dataset.table, parseInt(th.dataset.col));
+      render();
+    });
+  });
+}
+
 /* ─── Events Table (sortable) ─── */
 function renderEvents(rows) {
   const id = 'eventTable';
-  const headers = ['When', 'Source', 'Model', 'Cost', 'Tokens', 'File'];
+  const headers = ['When', 'Source', 'Model', 'Est. Cost', 'Tokens', 'File'];
   const fieldExtract = [
     (e) => e.day || '',
-    (e) => e.source || '',
+    (e) => sourceKey(e) || '',
     (e) => e.model || '',
     (e) => e.estimated_cost_usd || 0,
     (e) => e.total_tokens || 0,
@@ -307,11 +419,11 @@ function renderEvents(rows) {
             (e) => `
           <tr>
             <td style="white-space:nowrap">${e.day}</td>
-            <td><span class="pill">${e.source}</span></td>
+            <td><span class="pill" title="${sourceDetail(e)} · ${e.granularity || 'usage'}">${sourceKey(e)}</span></td>
             <td><code>${e.model}</code></td>
             <td style="color:var(--ember);font-weight:600">${money(e.estimated_cost_usd)}</td>
             <td>${num(e.total_tokens)}</td>
-            <td><div class="stat-hint" title="${e.file}">${short(e.file)}</div></td>
+            <td><div class="stat-hint" title="${e.granularity || 'usage'}\n${e.file}">${short(e.file)}</div></td>
           </tr>
         `
           )
