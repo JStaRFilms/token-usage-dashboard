@@ -959,8 +959,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/status":
+        parsed = urlparse(self.path).path
+        if parsed == "/status":
             self.send_json(SCAN_STATE)
+        elif parsed in ("/legacy", "/legacy/"):
+            self.path = "/legacy.html"
+            super().do_GET()
         else:
             super().do_GET()
 

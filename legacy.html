@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token Ledger — Usage Monitor</title>
+  <meta name="description" content="Portable local dashboard for Takomi/Pi, Codex, and Antigravity model usage, cached context, and API-equivalent cost tracking." />
+  <link rel="stylesheet" href="/assets/legacy.css" />
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <main class="shell">
+    <div style="display:flex; justify-content:flex-end; margin-bottom: 16px;">
+      <a href="/" style="color:var(--phosphor); text-decoration:none; font-family:var(--font-mono); font-size:12px; font-weight:600; padding:6px 14px; border:1px solid var(--border); border-radius:4px; background:var(--bg-surface); transition:all 0.15s;">&larr; Switch to modern view</a>
+    </div>
+    <header class="hero">
+      <div class="brand">
+        <p class="eyebrow">Takomi/Pi + Codex + Antigravity monitor</p>
+        <h1>Token Ledger</h1>
+        <p class="sub">Portable local dashboard for model usage, cached context, and API-equivalent cost.</p>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" class="primary">Refresh scan</button>
+        <button id="reloadBtn" class="ghost">Reload data</button>
+        <div id="status" class="status-pill">loading…</div>
+      </div>
+    </header>
+
+    <section class="stat-grid" id="cards"></section>
+
+    <section class="controls-panel">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input id="search" placeholder="Filter model, source, session, file…" />
+      </div>
+      <div class="filter-group">
+        <select id="sourceFilter"><option value="all">All sources</option></select>
+        <select id="modelFilter"><option value="all">All models</option></select>
+      </div>
+    </section>
+
+    <div class="main-grid">
+      <section class="chart-section">
+        <article class="viz-card">
+          <div class="card-header">
+            <h2>Cost by model</h2>
+            <span class="badge">Top 12</span>
+          </div>
+          <div id="modelBars" class="bars-container"></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="card-header">
+            <h2>Monthly cost trend</h2>
+            <span class="badge">By month</span>
+          </div>
+          <div id="monthBars" class="bars-container compact"></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="card-header">
+            <h2>Daily cost trend</h2>
+            <span class="badge">Last 30 days</span>
+          </div>
+          <div id="dayBars" class="bars-container compact"></div>
+        </article>
+      </section>
+
+      <section class="table-section">
+        <article class="viz-card">
+          <div class="card-header"><h2>Monthly breakdown</h2></div>
+          <div id="monthTable" class="table-wrap"></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="card-header"><h2>Source distribution</h2></div>
+          <div id="sourceTable" class="table-wrap"></div>
+        </article>
+        
+        <article class="viz-card">
+          <div class="card-header"><h2>Pricing model</h2></div>
+          <div id="priceTable" class="table-wrap"></div>
+        </article>
+      </section>
+    </div>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Model usage details</h2></div>
+      <div id="modelTable" class="table-wrap"></div>
+    </section>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Highest Estimated-Cost Sessions</h2></div>
+      <div id="sessionTable" class="table-wrap"></div>
+    </section>
+
+    <section class="viz-card full-width">
+      <div class="card-header"><h2>Largest Raw Usage Records</h2></div>
+      <div id="eventTable" class="table-wrap"></div>
+    </section>
+
+    <footer class="system-meta">
+      <div class="meta-section">
+        <h3>Caveats</h3>
+        <ul id="caveats" class="caveat-list"></ul>
+      </div>
+      <div class="meta-section">
+        <h3>System Warnings</h3>
+        <pre id="warnings" class="warnings-log"></pre>
+      </div>
+    </footer>
+  </main>
+  <script src="/assets/legacy.js?v=latest-first"></script>
+</body>
+</html>

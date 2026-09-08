@@ -1,112 +1,374 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Token Ledger — Usage Monitor</title>
-  <meta name="description" content="Portable local dashboard for Takomi/Pi, Codex, and Antigravity model usage, cached context, and API-equivalent cost tracking." />
+  <title>Usage — Token Ledger</title>
+  <meta name="description" content="Modern usage monitor for Takomi/Pi, Codex, and Antigravity model usage." />
   <link rel="stylesheet" href="assets/app.css" />
 </head>
-<body>
-  <div class="bg-glow"></div>
-  <main class="shell">
-    <header class="hero">
-      <div class="brand">
-        <p class="eyebrow">Takomi/Pi + Codex + Antigravity monitor</p>
-        <h1>Token Ledger</h1>
-        <p class="sub">Portable local dashboard for model usage, cached context, and API-equivalent cost.</p>
+<body data-view="modern">
+  <!-- Top Navigation Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <div class="brand-group">
+        <span class="brand-title">Usage</span>
       </div>
-      <div class="actions">
-        <button id="refreshBtn" class="primary">Refresh scan</button>
-        <button id="reloadBtn" class="ghost">Reload data</button>
-        <div id="status" class="status-pill">loading…</div>
-      </div>
-    </header>
-
-    <section class="stat-grid" id="cards"></section>
-
-    <section class="controls-panel">
-      <div class="search-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        <input id="search" placeholder="Filter model, source, session, file…" />
-      </div>
-      <div class="filter-group">
-        <select id="sourceFilter"><option value="all">All sources</option></select>
-        <select id="modelFilter"><option value="all">All models</option></select>
-      </div>
-    </section>
-
-    <div class="main-grid">
-      <section class="chart-section">
-        <article class="viz-card">
-          <div class="card-header">
-            <h2>Cost by model</h2>
-            <span class="badge">Top 12</span>
-          </div>
-          <div id="modelBars" class="bars-container"></div>
-        </article>
-
-        <article class="viz-card">
-          <div class="card-header">
-            <h2>Monthly cost trend</h2>
-            <span class="badge">By month</span>
-          </div>
-          <div id="monthBars" class="bars-container compact"></div>
-        </article>
-
-        <article class="viz-card">
-          <div class="card-header">
-            <h2>Daily cost trend</h2>
-            <span class="badge">Last 30 days</span>
-          </div>
-          <div id="dayBars" class="bars-container compact"></div>
-        </article>
-      </section>
-
-      <section class="table-section">
-        <article class="viz-card">
-          <div class="card-header"><h2>Monthly breakdown</h2></div>
-          <div id="monthTable" class="table-wrap"></div>
-        </article>
-
-        <article class="viz-card">
-          <div class="card-header"><h2>Source distribution</h2></div>
-          <div id="sourceTable" class="table-wrap"></div>
-        </article>
-        
-        <article class="viz-card">
-          <div class="card-header"><h2>Pricing model</h2></div>
-          <div id="priceTable" class="table-wrap"></div>
-        </article>
-      </section>
     </div>
-
-    <section class="viz-card full-width">
-      <div class="card-header"><h2>Model usage details</h2></div>
-      <div id="modelTable" class="table-wrap"></div>
-    </section>
-
-    <section class="viz-card full-width">
-      <div class="card-header"><h2>Highest Estimated-Cost Sessions</h2></div>
-      <div id="sessionTable" class="table-wrap"></div>
-    </section>
-
-    <section class="viz-card full-width">
-      <div class="card-header"><h2>Largest Raw Usage Records</h2></div>
-      <div id="eventTable" class="table-wrap"></div>
-    </section>
-
-    <footer class="system-meta">
-      <div class="meta-section">
-        <h3>Caveats</h3>
-        <ul id="caveats" class="caveat-list"></ul>
+    <div class="header-right">
+      <div id="dateRangeBadge" class="date-range-badge">Loading…</div>
+      <div class="select-wrapper">
+        <select id="timeRangeSelect" aria-label="Select date range">
+          <option value="30d">30 days</option>
+          <option value="90d">90 days</option>
+          <option value="6m" selected>6 months</option>
+          <option value="1y">1 year</option>
+          <option value="all">All time</option>
+        </select>
       </div>
-      <div class="meta-section">
-        <h3>System Warnings</h3>
-        <pre id="warnings" class="warnings-log"></pre>
+      <button id="themeToggleBtn" class="action-btn icon-only" title="Toggle dark/light mode" aria-label="Toggle theme">
+        <svg id="themeIconSun" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg id="themeIconMoon" class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <a href="/legacy" class="pill-btn" title="Switch to legacy view" style="text-decoration:none">
+        <span class="pill-indicator"></span>Legacy
+      </a>
+      <button id="refreshBtn" class="action-btn icon-only" title="Refresh scan from disk" aria-label="Refresh scan">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
+      <div id="status" class="status-pill">● synced</div>
+    </div>
+  </header>
+
+  <!-- Modern Application Shell -->
+  <div id="modernApp" class="app-layout">
+    <!-- Sidebar -->
+    <aside class="app-sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-heading">Workspace</div>
+        <nav class="sidebar-nav">
+          <button class="nav-btn active" data-tab="overview">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            <span>Overview</span>
+          </button>
+          <button class="nav-btn" data-tab="trends">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Trends</span>
+          </button>
+          <button class="nav-btn" data-tab="models">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+            <span>Models</span>
+          </button>
+          <button class="nav-btn" data-tab="sessions">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span>Sessions</span>
+          </button>
+        </nav>
       </div>
-    </footer>
-  </main>
-  <script src="assets/app.js?v=latest-first"></script>
+
+      <div class="sidebar-footer">
+        <button id="openPricingBtn" class="sidebar-link-btn">Pricing &amp; data</button>
+        <a href="/legacy" class="sidebar-link-btn text-muted" style="text-decoration:none">Switch to Legacy</a>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Area -->
+    <main class="app-main">
+      <!-- 1. OVERVIEW TAB -->
+      <section id="pane-overview" class="view-pane active">
+        <div class="pane-header">
+          <h1 class="pane-title">Overview</h1>
+          <p class="pane-subtitle">Your usage at a glance</p>
+        </div>
+
+        <!-- Top Hero Grid: Big Metric on Left + Daily Usage Chart on Right -->
+        <div class="overview-hero-grid">
+          <div class="kpi-hero-card">
+            <div class="hero-val" id="ovProcessedTokens">0</div>
+            <div class="hero-label">Processed tokens</div>
+            <div class="hero-divider"></div>
+            <div class="hero-submetrics">
+              <div class="submetric-col">
+                <div class="submetric-val" id="ovApiCost">$0.00</div>
+                <div class="submetric-label">estimated API cost</div>
+                <div id="ovSavingsTag" class="savings-tag" style="display:none"></div>
+              </div>
+              <div class="submetric-col">
+                <div class="submetric-val" id="ovSessionCount">0</div>
+                <div class="submetric-label">sessions</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-hero-card">
+            <div class="card-header-row">
+              <div class="card-title-group">
+                <h3 class="card-title">Daily usage</h3>
+                <span class="card-unit" id="ovDailyChartUnit">Tokens</span>
+              </div>
+              <div class="toggle-pill-group" id="ovDailyMetricToggle">
+                <button class="toggle-pill active" data-metric="tokens">Tokens</button>
+                <button class="toggle-pill" data-metric="cost">Cost</button>
+              </div>
+            </div>
+            <div class="chart-box" id="ovDailyChartWrap">
+              <svg id="ovDailySvg" class="svg-chart" preserveAspectRatio="none"></svg>
+              <div id="ovDailyTooltip" class="chart-tooltip"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom Row: Sources on Left + Token Composition on Right -->
+        <div class="overview-bottom-grid">
+          <div class="surface-card">
+            <div class="card-header-row">
+              <div class="card-title-group">
+                <h3 class="card-title">Sources</h3>
+                <p class="card-subtitle">Total tokens by source</p>
+              </div>
+            </div>
+            <div class="source-bars-list" id="ovSourcesList">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <div class="surface-card">
+            <div class="card-header-row">
+              <div class="card-title-group">
+                <h3 class="card-title">Token composition</h3>
+                <p class="card-subtitle">Total tokens and breakdown by type</p>
+              </div>
+            </div>
+            <div class="composition-bar-wrap">
+              <div class="composition-stacked-bar" id="ovCompositionBar">
+                <div class="comp-slice slice-cache" id="ovSliceCache"></div>
+                <div class="comp-slice slice-uncached" id="ovSliceUncached"></div>
+                <div class="comp-slice slice-output" id="ovSliceOutput"></div>
+              </div>
+            </div>
+            <div class="composition-grid" id="ovCompositionGrid">
+              <div class="comp-stat-col">
+                <div class="comp-dot-label"><span class="dot dot-cache"></span>Cached input</div>
+                <div class="comp-num" id="ovCompCacheVal">0</div>
+                <div class="comp-pct" id="ovCompCachePct">0%</div>
+              </div>
+              <div class="comp-stat-col">
+                <div class="comp-dot-label"><span class="dot dot-uncached"></span>Uncached input</div>
+                <div class="comp-num" id="ovCompUncachedVal">0</div>
+                <div class="comp-pct" id="ovCompUncachedPct">0%</div>
+              </div>
+              <div class="comp-stat-col">
+                <div class="comp-dot-label"><span class="dot dot-output"></span>Output</div>
+                <div class="comp-num" id="ovCompOutputVal">0</div>
+                <div class="comp-pct" id="ovCompOutputPct">0%</div>
+              </div>
+            </div>
+            <div class="card-action-row">
+              <button class="text-link-btn" id="ovExploreModelsBtn">Explore models &rarr;</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. TRENDS TAB -->
+      <section id="pane-trends" class="view-pane">
+        <div class="pane-header-row">
+          <div class="pane-header">
+            <h1 class="pane-title">Trends</h1>
+            <p class="pane-subtitle">See when usage changes.</p>
+          </div>
+          <div class="trends-controls">
+            <div class="toggle-pill-group" id="trendsGranularityToggle">
+              <button class="toggle-pill active" data-granularity="daily">Daily</button>
+              <button class="toggle-pill" data-granularity="monthly">Monthly</button>
+            </div>
+            <div class="toggle-pill-group" id="trendsMetricToggle">
+              <button class="toggle-pill" data-metric="tokens">Tokens</button>
+              <button class="toggle-pill active" data-metric="cost">Cost</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Main Multi-Line Trends Chart Card -->
+        <div class="surface-card chart-hero-panel">
+          <div class="card-header-row">
+            <div class="card-title-group">
+              <h3 class="card-title" id="trendsChartTitle">Estimated API cost over time</h3>
+              <p class="card-subtitle" id="trendsChartSubtitle">Total daily cost by source.</p>
+            </div>
+          </div>
+          <div class="chart-box tall" id="trendsChartWrap">
+            <svg id="trendsSvg" class="svg-chart" preserveAspectRatio="none"></svg>
+            <div id="trendsTooltip" class="chart-tooltip"></div>
+          </div>
+          <div class="chart-legend-row" id="trendsLegend">
+            <div class="legend-chip"><span class="dot dot-takomi"></span>Takomi/Pi</div>
+            <div class="legend-chip"><span class="dot dot-codex"></span>Codex</div>
+            <div class="legend-chip"><span class="dot dot-antigravity"></span>Antigravity</div>
+          </div>
+        </div>
+
+        <!-- Trends Bottom Row: Peak Day, Daily Avg, and Monthly Vertical Bars -->
+        <div class="trends-bottom-grid">
+          <div class="surface-card metric-callout-card">
+            <div class="metric-callout-label">Peak day</div>
+            <div class="metric-callout-sub" id="trendsPeakDayLabel">—</div>
+            <div class="metric-callout-val highlight" id="trendsPeakDayVal">$0.00</div>
+          </div>
+          <div class="surface-card metric-callout-card">
+            <div class="metric-callout-label">Daily average</div>
+            <div class="metric-callout-val large" id="trendsDailyAvgVal">$0.00</div>
+          </div>
+          <div class="surface-card monthly-bar-card">
+            <div class="card-header-row">
+              <div class="card-title-group">
+                <h3 class="card-title">By month</h3>
+                <p class="card-subtitle" id="trendsMonthlySubtitle">Estimated API cost</p>
+              </div>
+            </div>
+            <div class="monthly-columns-box" id="trendsMonthlyColumns">
+              <!-- Dynamically rendered vertical bars -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. MODELS TAB -->
+      <section id="pane-models" class="view-pane">
+        <div class="pane-header-row">
+          <div class="pane-header">
+            <h1 class="pane-title">Models</h1>
+            <p class="pane-subtitle">Where your tokens and estimated cost go</p>
+          </div>
+          <div class="models-toolbar">
+            <div class="search-input-wrap">
+              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="modelsSearchInput" placeholder="Search model or alias…" />
+            </div>
+            <div class="select-wrapper">
+              <select id="modelsSourceSelect">
+                <option value="all">All sources</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface-card models-card">
+          <div class="models-table-head">
+            <div class="col-head col-model">Model</div>
+            <div class="col-head col-tokens">Processed tokens</div>
+            <div class="col-head col-cost">Est. cost</div>
+            <div class="col-head col-share">Cost share</div>
+          </div>
+          <div class="models-accordion-list" id="modelsAccordionList">
+            <!-- Dynamically populated accordion rows -->
+          </div>
+        </div>
+        <p class="section-footer-hint">Select a model to inspect its sources and token breakdown.</p>
+      </section>
+
+      <!-- 4. SESSIONS TAB -->
+      <section id="pane-sessions" class="view-pane">
+        <div class="pane-header">
+          <h1 class="pane-title">Sessions</h1>
+          <p class="pane-subtitle">Trace usage back to a conversation.</p>
+        </div>
+
+        <div class="sessions-filter-toolbar">
+          <div class="search-input-wrap flex-fill">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="sessionsSearchInput" placeholder="Search session, model or file" />
+          </div>
+          <div class="select-wrapper">
+            <select id="sessionsSourceSelect">
+              <option value="all">All sources</option>
+            </select>
+          </div>
+          <div class="select-wrapper">
+            <select id="sessionsSortSelect">
+              <option value="cost-desc">Highest cost</option>
+              <option value="date-desc">Most recent</option>
+              <option value="tokens-desc">Most tokens</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Two-column split layout -->
+        <div class="sessions-split-layout">
+          <!-- Left Column: Scrollable Sessions List -->
+          <div class="sessions-list-panel" id="sessionsList">
+            <!-- Populated via JS -->
+          </div>
+
+          <!-- Right Column: Selected Session Inspector -->
+          <div class="surface-card session-detail-inspector" id="sessionInspector">
+            <!-- Populated via JS -->
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+
+  <!-- Pricing & Data Modal / Drawer -->
+  <div id="pricingModal" class="modal-backdrop" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Pricing &amp; system data</h2>
+        <button id="closePricingBtn" class="close-btn" aria-label="Close modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-tabs">
+          <button class="modal-tab-btn active" data-modal-pane="rates">Price table</button>
+          <button class="modal-tab-btn" data-modal-pane="discounts">Discounts</button>
+          <button class="modal-tab-btn" data-modal-pane="caveats">Caveats</button>
+          <button class="modal-tab-btn" data-modal-pane="warnings">Warnings</button>
+          <button class="modal-tab-btn" data-modal-pane="export">Export</button>
+        </div>
+
+        <div id="modalPaneRates" class="modal-pane active">
+          <div class="modal-table-wrap" id="pricingTableWrap"></div>
+        </div>
+
+        <div id="modalPaneDiscounts" class="modal-pane">
+          <div id="pricingDiscountsWrap"></div>
+        </div>
+
+        <div id="modalPaneCaveats" class="modal-pane">
+          <ul id="pricingCaveatsList" class="caveats-bullets"></ul>
+        </div>
+
+        <div id="modalPaneWarnings" class="modal-pane">
+          <pre id="pricingWarningsText" class="warnings-box"></pre>
+        </div>
+
+        <div id="modalPaneExport" class="modal-pane">
+          <p class="export-desc">Download current aggregated data or raw events in JSON format.</p>
+          <div class="export-actions">
+            <a href="data/usage-summary.json" download="usage-summary.json" class="primary-btn">Download summary.json</a>
+            <a href="data/usage-events.json" download="usage-events.json" class="secondary-btn">Download events.json</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Events Slide-Over Drawer -->
+  <div id="sessionEventsDrawer" class="drawer-backdrop" style="display:none">
+    <div class="drawer-panel">
+      <div class="drawer-header">
+        <div>
+          <h2 class="drawer-title" id="drawerSessionTitle">Session events</h2>
+          <p class="drawer-sub" id="drawerSessionSub">Event-level API call breakdown</p>
+        </div>
+        <button id="closeDrawerBtn" class="close-btn" aria-label="Close drawer">&times;</button>
+      </div>
+      <div class="drawer-body" id="drawerEventsList">
+        <!-- Rendered events table -->
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/app.js?v=4.0.0"></script>
 </body>
 </html>
