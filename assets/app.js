@@ -77,6 +77,7 @@ function sumRows(rows) {
       'output_tokens',
       'reasoning_output_tokens',
       'total_tokens',
+      'discount_amount_usd',
     ])
       a[k] = (a[k] || 0) + (e[k] || 0);
     a.estimated_cost_usd =
@@ -89,7 +90,10 @@ function sumRows(rows) {
 function group(rows, key) {
   const m = new Map();
   for (const e of rows) {
-    const k = key === 'source_group' ? sourceKey(e) : e[key] || 'unknown';
+    let k;
+    if (key === 'source_group') k = sourceKey(e);
+    else if (key === 'month') k = e.month || (e.day ? e.day.slice(0, 7) : 'unknown');
+    else k = e[key] || 'unknown';
     if (!m.has(k))
       m.set(k, { key: k, cost: 0, input: 0, cache: 0, output: 0, total: 0, events: 0 });
     const r = m.get(k);
@@ -169,6 +173,9 @@ function render() {
       `${new Set(rows.map((e) => e.session_id)).size} sessions`,
     ],
   ];
+  if (totals.discount_amount_usd > 0) {
+    cards.push(['Savings', money(totals.discount_amount_usd), 'discounts applied']);
+  }
 
   $('cards').innerHTML = cards
     .map(
@@ -190,6 +197,11 @@ function render() {
       .slice(0, 12)
   );
   renderBars(
+    'monthBars',
+    group(rows, 'month')
+      .sort((a, b) => b.key.localeCompare(a.key))
+  );
+  renderBars(
     'dayBars',
     group(rows, 'day')
       .sort((a, b) => b.key.localeCompare(a.key))
@@ -197,6 +209,11 @@ function render() {
   );
 
   // Tables
+  renderTable(
+    'monthTable',
+    group(rows, 'month').sort((a, b) => b.key.localeCompare(a.key)),
+    ['Month', 'Cost', 'Total', 'Input', 'Cache', 'Output', 'Calls']
+  );
   renderTable(
     'sourceTable',
     group(rows, 'source_group').sort((a, b) => b.cost - a.cost),

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -26,6 +27,7 @@ DEFAULT_CONFIG = ROOT / "config.json"
 # USD per 1M tokens: input, cached input/cache read, output.
 # Reasoning output is included in output_tokens by Codex totals; kept separately for reporting only.
 PRICES = {
+    "gpt-6-astra": (10.00, 1.00, 50.00),
     "gpt-5.6-luna": (0.20, 0.02, 1.20),
     "gpt-5.6-sol": (5.00, 0.50, 30.00),
     "gpt-5.6-terra": (2.00, 0.20, 12.00),
@@ -47,6 +49,8 @@ PRICES = {
     # Anthropic best-effort, used only when present in Pi logs.
     "claude-sonnet-4-6": (3.00, 0.30, 15.00),
     # Google Gemini Developer API paid tier, per 1M text/image/video tokens.
+    "gemini-3.8-flash": (0.75, 0.075, 3.75),
+    "gemini-3.7-flash": (0.75, 0.075, 3.75),
     "gemini-3.6-flash": (1.50, 0.15, 7.50),
     "gemini-embedding-001": (0.15, 0.00, 0.00),
     "gemini-3.1-pro-preview": (2.00, 0.20, 12.00),
@@ -63,11 +67,14 @@ PRICES = {
 }
 
 PRICE_NOTES = {
+    "gpt-6-astra": "OpenAI standard short-context pricing ($10.00 / $1.00 / $50.00).",
     "gpt-5.6-luna": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $1.00 / $0.10 / $6.00 rate.",
     "gpt-5.6-sol": "OpenAI standard short-context pricing; unchanged on July 30, 2026.",
     "gpt-5.6-terra": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $2.50 / $0.25 / $15.00 rate.",
     "gpt-5.3-codex": "No public row supplied; priced as gpt-5.4-class estimate.",
     "claude-sonnet-4-6": "Best-effort Sonnet-class estimate, not from supplied OpenAI table.",
+    "gemini-3.8-flash": "Google Gemini 3.8 Flash promotional API rate through 2026-12-31 ($0.75 / $0.075 / $3.75), then standard ($1.50 / $0.15 / $7.50).",
+    "gemini-3.7-flash": "Google Gemini 3.7 Flash promotional rate through 2026-12-31 ($0.75 / $0.075 / $3.75), then standard ($1.50 / $0.15 / $7.50).",
     "gemini-3.6-flash": "Google Gemini API standard text/image/video rate.",
     "gemini-embedding-001": "Google Gemini API text embedding input rate.",
     "gemini-3.1-pro-preview": "Google Gemini API standard text/image/video rate; <=200K-context tier.",
@@ -116,38 +123,128 @@ LEGACY_GPT_5_6_PRICES = {
     "gpt-5.6-luna": (1.00, 0.10, 6.00),
     "gpt-5.6-terra": (2.50, 0.25, 15.00),
 }
+RATE_SCHEDULES = {
+    "gpt-5.6-luna": [
+        {"until": "2026-07-30", "price": (1.00, 0.10, 6.00), "note": "Legacy OpenAI rate before 2026-07-30."},
+        {"since": "2026-07-30", "price": (0.20, 0.02, 1.20), "note": "OpenAI standard short-context pricing from 2026-07-30."},
+    ],
+    "gpt-5.6-terra": [
+        {"until": "2026-07-30", "price": (2.50, 0.25, 15.00), "note": "Legacy OpenAI rate before 2026-07-30."},
+        {"since": "2026-07-30", "price": (2.00, 0.20, 12.00), "note": "OpenAI standard short-context pricing from 2026-07-30."},
+    ],
+    "gemini-3.8-flash": [
+        {"until": "2027-01-01", "price": (0.75, 0.075, 3.75), "note": "Google Gemini 3.8 Flash promotional developer API rate through 2026-12-31."},
+        {"since": "2027-01-01", "price": (1.50, 0.15, 7.50), "note": "Google Gemini 3.8 Flash standard developer API rate."},
+    ],
+    "gemini-3.7-flash": [
+        {"until": "2027-01-01", "price": (0.75, 0.075, 3.75), "note": "Google Gemini 3.7 Flash promotional developer API rate through 2026-12-31."},
+        {"since": "2027-01-01", "price": (1.50, 0.15, 7.50), "note": "Google Gemini 3.7 Flash standard developer API rate."},
+    ],
+}
 MODEL_ALIASES = {
     "ar-gpt-5.6-luna": "gpt-5.6-luna",
     "ar-gpt-5.6-sol": "gpt-5.6-sol",
     "ar-gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-6-astra": "gpt-6-astra",
+    "gemini-3.8-flash": "gemini-3.8-flash",
+    "gemini-3.7-flash": "gemini-3.7-flash",
+    "gemini-3.8-flash-preview": "gemini-3.8-flash",
+    "gemini-3.7-flash-preview": "gemini-3.7-flash",
+    "gemini-3.8-flash-control": "gemini-3.8-flash",
+    "gemini-3.8-flash-tiered": "gemini-3.8-flash",
+    "gemini-3.8-flash-high": "gemini-3.8-flash",
+    "gemini-3.8-flash-low": "gemini-3.8-flash",
+    "gemini-3.7-flash-control": "gemini-3.7-flash",
+    "gemini-3.7-flash-tiered": "gemini-3.7-flash",
+    "gemini-3.7-flash-high": "gemini-3.7-flash",
+    "gemini-3.7-flash-low": "gemini-3.7-flash",
     "gemini-default": "gemini-3.5-flash",
     "gemini-flash-latest": "gemini-3-flash-preview",
     "gemini-pro-d": "gemini-3.1-pro-preview",
     "gemini-3.5-pro": "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-low": "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-high": "gemini-3.1-pro-preview",
+    "gemini-pro-default": "gemini-3.1-pro-preview",
     "gemini-3.6-flash-exp-b": "gemini-3.6-flash",
     "gemini-3.6-flash-high": "gemini-3.6-flash",
     "gemini-3.6-flash-low": "gemini-3.6-flash",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "gpt-5.1-codex-mini": "gpt-5-mini",
+    "gpt-5.1-codex-max": "gpt-5.1",
+    "gpt-5.3-codex-spark": "gpt-5.3-codex",
 }
 
 
 def canonical_model(model: str) -> str:
     normalized = (model or "unknown").lower()
-    if normalized.startswith("antigravity/"):
-        normalized = normalized.removeprefix("antigravity/")
+    for prefix in ("openai-codex/", "openai/", "antigravity/", "google/", "anthropic/"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+    normalized = re.sub(r"\[(low|medium|high|xhigh|max|ultra)\]$", "", normalized)
     return MODEL_ALIASES.get(normalized, normalized)
 
 
-def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: int, input_includes_cache: bool, timestamp: str | None) -> tuple[float | None, dict]:
+def find_discount(discounts: list[dict] | None, model: str, timestamp: str | None) -> dict | None:
+    if not discounts or not isinstance(discounts, list):
+        return None
+    day = iso_day(timestamp)
+    month = day[:7] if len(day) >= 7 else ""
+    c_model = canonical_model(model)
+    for d in discounts:
+        if not isinstance(d, dict):
+            continue
+        d_model = d.get("model")
+        if d_model and d_model != "*":
+            if canonical_model(d_model) != c_model and d_model.lower() != (model or "").lower():
+                continue
+        d_month = d.get("month")
+        if d_month and d_month != month:
+            continue
+        start = d.get("start") or d.get("since")
+        if start and day < start:
+            continue
+        end = d.get("end") or d.get("until")
+        if end and day >= end:
+            continue
+        return d
+    return None
+
+
+def price_for_model(model: str, timestamp: str | None) -> tuple[tuple[float, float, float] | None, str | None]:
     priced_as = canonical_model(model)
     if priced_as.endswith(":free") or priced_as == "openrouter/free":
-        price = (0.0, 0.0, 0.0)
-        note = "Provider designates this model as free."
-    elif priced_as in LEGACY_GPT_5_6_PRICES and iso_day(timestamp) < GPT_5_6_PRICE_CHANGE_DAY:
-        price = LEGACY_GPT_5_6_PRICES[priced_as]
-        note = f"Legacy OpenAI rate before {GPT_5_6_PRICE_CHANGE_DAY}."
-    else:
-        price = PRICES.get(priced_as)
-        note = PRICE_NOTES.get(priced_as)
+        return (0.0, 0.0, 0.0), "Provider designates this model as free."
+
+    day = iso_day(timestamp)
+    schedule = RATE_SCHEDULES.get(priced_as)
+    if schedule:
+        for entry in schedule:
+            if "until" in entry and day < entry["until"]:
+                return entry["price"], entry.get("note")
+            if "since" in entry and day >= entry["since"]:
+                if "until" in entry and day >= entry["until"]:
+                    continue
+                return entry["price"], entry.get("note")
+
+    if priced_as in LEGACY_GPT_5_6_PRICES and day < GPT_5_6_PRICE_CHANGE_DAY:
+        return LEGACY_GPT_5_6_PRICES[priced_as], f"Legacy OpenAI rate before {GPT_5_6_PRICE_CHANGE_DAY}."
+
+    price = PRICES.get(priced_as)
+    note = PRICE_NOTES.get(priced_as)
+    return price, note
+
+
+def calc_cost(
+    model: str,
+    input_tokens: int,
+    cached_tokens: int,
+    output_tokens: int,
+    input_includes_cache: bool,
+    timestamp: str | None,
+    discounts: list[dict] | None = None,
+) -> tuple[float | None, dict]:
+    priced_as = canonical_model(model)
+    price, note = price_for_model(model, timestamp)
     if priced_as != (model or "unknown").lower():
         mapping_note = f"Mapped from {model} to {priced_as}."
         note = f"{note} {mapping_note}" if note else mapping_note
@@ -158,7 +255,24 @@ def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: 
     cost_input = non_cached * in_rate / 1_000_000
     cost_cache = cached_tokens * cache_rate / 1_000_000
     cost_output = output_tokens * out_rate / 1_000_000
-    return cost_input + cost_cache + cost_output, {
+    base_cost = cost_input + cost_cache + cost_output
+
+    discount = find_discount(discounts, priced_as, timestamp)
+    discount_percent = 0.0
+    discount_amount = 0.0
+    discount_name = None
+    final_cost = base_cost
+
+    if discount:
+        discount_percent = float(discount.get("percent", 0) or 0)
+        discount_name = discount.get("name") or f"{discount_percent}% off"
+        if discount_percent > 0:
+            discount_amount = base_cost * (discount_percent / 100.0)
+            final_cost = max(base_cost - discount_amount, 0.0)
+            discount_note = f"Discount applied: {discount_name} (-${discount_amount:.4f})."
+            note = f"{note} {discount_note}" if note else discount_note
+
+    price_info = {
         "known": True,
         "input_rate": in_rate,
         "cached_rate": cache_rate,
@@ -167,18 +281,40 @@ def calc_cost(model: str, input_tokens: int, cached_tokens: int, output_tokens: 
         "cost_input": cost_input,
         "cost_cache": cost_cache,
         "cost_output": cost_output,
+        "base_cost": base_cost,
+        "discount_percent": discount_percent,
+        "discount_amount": discount_amount,
+        "discount_name": discount_name,
         "note": note,
         "priced_as": priced_as,
     }
+    return final_cost, price_info
 
 
-def event(source, file, timestamp, session_id, model, input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, input_includes_cache, granularity):
-    cost, price = calc_cost(model or "unknown", input_tokens, cached_tokens, output_tokens, input_includes_cache, timestamp)
+def event(
+    source,
+    file,
+    timestamp,
+    session_id,
+    model,
+    input_tokens,
+    cached_tokens,
+    output_tokens,
+    reasoning_tokens,
+    total_tokens,
+    input_includes_cache,
+    granularity,
+    discounts: list[dict] | None = None,
+):
+    cost, price = calc_cost(model or "unknown", input_tokens, cached_tokens, output_tokens, input_includes_cache, timestamp, discounts)
+    day = iso_day(timestamp)
+    month = day[:7] if len(day) >= 7 else "unknown"
     return {
         "source": source,
         "file": str(file),
         "timestamp": timestamp,
-        "day": iso_day(timestamp),
+        "day": day,
+        "month": month,
         "session_id": session_id,
         "model": model or "unknown",
         "input_tokens": input_tokens,
@@ -189,11 +325,14 @@ def event(source, file, timestamp, session_id, model, input_tokens, cached_token
         "input_includes_cache": input_includes_cache,
         "granularity": granularity,
         "estimated_cost_usd": cost,
+        "base_cost_usd": price.get("base_cost", cost) if price.get("discount_amount", 0) > 0 else cost,
+        "discount_amount_usd": price.get("discount_amount", 0.0),
+        "discount_name": price.get("discount_name"),
         "price": price,
     }
 
 
-def scan_codex(root: Path) -> tuple[list[dict], list[str]]:
+def scan_codex(root: Path, discounts: list[dict] | None = None) -> tuple[list[dict], list[str]]:
     events, warnings = [], []
     usage_keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
     if not root.exists():
@@ -237,13 +376,14 @@ def scan_codex(root: Path) -> tuple[list[dict], list[str]]:
                         delta["total_tokens"],
                         True,
                         "usage-delta",
+                        discounts=discounts,
                     ))
         except Exception as e:
             warnings.append(f"Codex parse failed: {file}: {e}")
     return events, warnings
 
 
-def scan_pi(root: Path, source_name: str = "pi") -> tuple[list[dict], list[str], set[str]]:
+def scan_pi(root: Path, source_name: str = "pi", discounts: list[dict] | None = None) -> tuple[list[dict], list[str], set[str]]:
     events, warnings, cwds = [], [], set()
     if not root.exists():
         return events, [f"Pi sessions path missing: {root}"], cwds
@@ -279,6 +419,7 @@ def scan_pi(root: Path, source_name: str = "pi") -> tuple[list[dict], list[str],
                             int(u.get("totalTokens", 0) or 0),
                             False,
                             "model-call",
+                            discounts=discounts,
                         ) | {"provider": provider, "cwd": cwd})
         except Exception as e:
             warnings.append(f"Pi parse failed: {file}: {e}")
@@ -351,7 +492,7 @@ def find_gemini_token_records(obj: dict, ancestors: list[dict] | None = None):
                     yield from find_gemini_token_records(item, ancestors + [obj])
 
 
-def scan_gemini(root: Path) -> tuple[list[dict], list[str]]:
+def scan_gemini(root: Path, discounts: list[dict] | None = None) -> tuple[list[dict], list[str]]:
     """Scan local Gemini CLI chat histories for explicit token metadata.
 
     Gemini CLI stores token counts as message-level `tokens` dictionaries. In JSONL
@@ -384,6 +525,7 @@ def scan_gemini(root: Path) -> tuple[list[dict], list[str]]:
                         as_int(tokens.get("total")),
                         True,
                         "model-call",
+                        discounts=discounts,
                     ) | {
                         "provider": "google",
                         "message_id": message_id,
@@ -525,7 +667,7 @@ def extract_antigravity_usage(blob: bytes) -> tuple[str, dict] | None:
     }
 
 
-def scan_antigravity_dbs(root: Path) -> tuple[list[dict], list[str], dict]:
+def scan_antigravity_dbs(root: Path, discounts: list[dict] | None = None) -> tuple[list[dict], list[str], dict]:
     events, warnings = [], []
     stats = {"db_files": 0, "duplicate_rows_skipped": 0, "pb_files_not_decoded": 0}
     if not root.exists():
@@ -570,6 +712,7 @@ def scan_antigravity_dbs(root: Path) -> tuple[list[dict], list[str], dict]:
                     tokens["input"], tokens["cached"], tokens["output"], tokens["thoughts"], tokens["total"],
                     True,
                     "antigravity-gen-metadata",
+                    discounts=discounts,
                 ) | {
                     "provider": "google",
                     "message_id": f"{session_id}:{idx}",
@@ -643,37 +786,46 @@ def discover_project_pi_roots(project_roots: list[str]) -> tuple[list[Path], lis
     return found, warnings
 
 
-def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
+def aggregate(events: list[dict], warnings: list[str], started: float, discounts: list[dict] | None = None) -> dict:
     totals = Counter()
     by_model = defaultdict(Counter)
     by_source = defaultdict(Counter)
     by_source_detail = defaultdict(Counter)
     by_day = defaultdict(Counter)
+    by_month = defaultdict(Counter)
     by_session = defaultdict(Counter)
     unknown_models = Counter()
 
     for e in events:
         keys = ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
+        day = e.get("day") or "unknown"
+        month = e.get("month") or (day[:7] if len(day) >= 7 else "unknown")
         for k in keys:
             totals[k] += e[k]
             by_model[e["model"]][k] += e[k]
             by_source[e.get("source_group", e["source"])][k] += e[k]
             by_source_detail[e["source"]][k] += e[k]
-            by_day[e["day"]][k] += e[k]
+            by_day[day][k] += e[k]
+            by_month[month][k] += e[k]
             by_session[e["session_id"]][k] += e[k]
         if e["estimated_cost_usd"] is not None:
             totals["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_model[e["model"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_source[e.get("source_group", e["source"])]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_source_detail[e["source"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
-            by_day[e["day"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_day[day]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_month[month]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_session[e["session_id"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            if e.get("discount_amount_usd"):
+                totals["discount_amount_usd"] += e["discount_amount_usd"]
+                by_month[month]["discount_amount_usd"] += e["discount_amount_usd"]
         else:
             unknown_models[e["model"]] += 1
         by_model[e["model"]]["events"] += 1
         by_source[e.get("source_group", e["source"])]["events"] += 1
         by_source_detail[e["source"]]["events"] += 1
-        by_day[e["day"]]["events"] += 1
+        by_day[day]["events"] += 1
+        by_month[month]["events"] += 1
         by_session[e["session_id"]]["events"] += 1
 
     def rows(d):
@@ -692,6 +844,8 @@ def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
         "by_source": rows(by_source),
         "by_source_detail": rows(by_source_detail),
         "by_day": sorted(rows(by_day), key=lambda r: r["key"]),
+        "by_month": sorted(rows(by_month), key=lambda r: r["key"]),
+        "discounts": discounts or [],
         "by_session": rows(by_session)[:250],
         "high_cost_events": high,
         "recent_events": recent,
@@ -707,6 +861,9 @@ def aggregate(events: list[dict], warnings: list[str], started: float) -> dict:
             "Project-local Pi/Takomi histories are discovered by following cwd links from global Pi sessions by default; broad project root scans are opt-in.",
             "Gemini pricing uses current Google Gemini API paid text/image/video rates; Pro models use the <=200K-context tier and internal aliases are mapped to their public equivalents where available.",
             "GPT-5.6 Luna and Terra preserve the pre-July 30, 2026 OpenAI rates for earlier usage; Sol pricing is unchanged.",
+            "Pricing schedules support date-effective transitions (e.g. GPT-5.6 Luna and Terra cuts on July 30, 2026; Gemini 3.8 Flash promotional rates through 2026-12-31; GPT-6 Astra launch).",
+            "Configurable promotional and period discounts can be defined in config.json under 'discounts' with optional model, date/month filters.",
+            "Monthly usage rollups are available via by_month in the generated summary.",
             "gpt-5.3-codex has no supplied public price row and is estimated as gpt-5.4-class.",
         ],
     }
@@ -716,12 +873,13 @@ def refresh(config_path: Path = DEFAULT_CONFIG) -> dict:
     started = time.time()
     config = load_config(config_path)
     sources = config.get("sources", {})
-    codex_events, codex_warn = scan_codex(Path(sources.get("codex", "")))
+    discounts = config.get("discounts", [])
+    codex_events, codex_warn = scan_codex(Path(sources.get("codex", "")), discounts=discounts)
     pi_root = Path(sources.get("pi_sessions", ""))
-    pi_events, pi_warn, pi_cwds = scan_pi(pi_root, "pi-global")
+    pi_events, pi_warn, pi_cwds = scan_pi(pi_root, "pi-global", discounts=discounts)
     gemini_root = Path(sources.get("gemini", ""))
-    gemini_events, gemini_warn = scan_gemini(gemini_root) if sources.get("gemini") else ([], [])
-    antigravity_events, antigravity_warn, antigravity_stats = scan_antigravity_dbs(gemini_root) if sources.get("gemini") else ([], [], {})
+    gemini_events, gemini_warn = scan_gemini(gemini_root, discounts=discounts) if sources.get("gemini") else ([], [])
+    antigravity_events, antigravity_warn, antigravity_stats = scan_antigravity_dbs(gemini_root, discounts=discounts) if sources.get("gemini") else ([], [], {})
     project_pi_events: list[dict] = []
     project_pi_warn: list[str] = []
 
@@ -752,13 +910,13 @@ def refresh(config_path: Path = DEFAULT_CONFIG) -> dict:
             unique_project_pi_roots.append(root)
 
     for root in unique_project_pi_roots:
-        ev, warn, _cwds = scan_pi(root, "pi-project-linked" if root in linked_roots else "pi-project")
+        ev, warn, _cwds = scan_pi(root, "pi-project-linked" if root in linked_roots else "pi-project", discounts=discounts)
         project_pi_events.extend(ev)
         project_pi_warn.extend(warn)
     events = codex_events + pi_events + gemini_events + antigravity_events + project_pi_events
     normalize_source_groups(events)
     warnings = codex_warn + pi_warn + gemini_warn + antigravity_warn + linked_warn + root_warn + project_pi_warn
-    summary = aggregate(events, warnings, started)
+    summary = aggregate(events, warnings, started, discounts=discounts)
     summary["config"] = config
     summary["discovered_project_pi_roots"] = [str(p) for p in unique_project_pi_roots]
     summary["project_discovery"] = {

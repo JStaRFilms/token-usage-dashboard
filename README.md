@@ -49,6 +49,10 @@ Edit `config.json` if you relocate the dashboard or want different sources:
 - Source distribution groups detailed sources into `takomi/pi`, `codex`, and `antigravity`; event rows keep detailed source names in hover text.
 - Gemini pricing uses current Google Gemini API paid text/image/video rates; Pro models use the <=200K-context tier, and observed internal aliases are mapped to their public equivalents where available.
 - GPT-5.6 Luna and Terra use the OpenAI rates effective July 30, 2026; earlier usage retains the prior rates. Sol pricing is unchanged.
+- GPT-6 Astra is supported at standard API rates ($10.00 input, $1.00 cached input, $50.00 output).
+- Gemini 3.8 Flash and Gemini 3.7 Flash use the promotional rate ($0.75 / $0.075 / $3.75) through 2026-12-31, and standard rates ($1.50 / $0.15 / $7.50) from 2027-01-01.
+- Configurable discounts can be declared in `config.json` under `"discounts"` with optional `model`, `month`, `start`, `end`, and `percent`.
+- Monthly usage trends and breakdowns are aggregated across all sources in both chart and table views.
 - Antigravity sqlite `gen_metadata` rows carry no per-record timestamps, so their events use the database modification time.
 - `gpt-5.3-codex` has no supplied public price row; it is estimated as GPT-5.4-class.
 - The history folders may contain sensitive prompts/secrets. Do not publish generated event data publicly.
