@@ -4,6 +4,8 @@
 
 let summary = null;
 let events = [];
+let eventsLoaded = false;
+let eventsLoading = false;
 
 const state = {
   theme: localStorage.getItem('token_ledger_theme') || 'dark',
@@ -15,10 +17,15 @@ const state = {
   modelsSource: 'all',
   modelsSearch: '',
   expandedModel: null,
+  sessionsViewMode: 'sessions', // 'sessions' | 'projects'
   sessionsSearch: '',
   sessionsSource: 'all',
   sessionsSort: 'cost-desc',
   selectedSessionId: null,
+  selectedProjectId: null,
+  sessionsProjectFilter: null,
+  sessionsVisibleCount: 100,
+  projectSessionsSearch: '',
   activeModalPane: 'rates',
   drawerSessionId: null,
 };
@@ -66,16 +73,39 @@ function formatSourceDisplay(s) {
   return s;
 }
 
-/* ─── Data Loading ─── */
+function copyText(text, btnElement, origLabel = 'Copy') {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    if (btnElement) {
+      btnElement.textContent = '✓ Copied!';
+      btnElement.style.color = 'var(--accent-emerald)';
+      setTimeout(() => {
+        btnElement.textContent = origLabel;
+        btnElement.style.color = '';
+      }, 1500);
+    }
+  }).catch(() => {
+    // Fallback
+    const t = document.createElement('textarea');
+    t.value = text;
+    document.body.appendChild(t);
+    t.select();
+    document.execCommand('copy');
+    document.body.removeChild(t);
+    if (btnElement) {
+      btnElement.textContent = '✓ Copied!';
+      setTimeout(() => { btnElement.textContent = origLabel; }, 1500);
+    }
+  });
+}
+
+/* ─── Instant Data Loading ─── */
 async function loadData() {
   try {
     const ts = Date.now();
-    const [sRes, eRes] = await Promise.all([
-      fetch('/data/usage-summary.json?x=' + ts).then((r) => r.json()),
-      fetch('/data/usage-events.json?x=' + ts).then((r) => r.json()),
-    ]);
+    // Load summary first: 2MB payload that renders in under 20ms!
+    const sRes = await fetch('/data/usage-summary.json?x=' + ts).then((r) => r.json());
     summary = sRes;
-    events = eRes;
 
     $('status').textContent = '● synced ' + new Date(summary.generated_at).toLocaleTimeString();
     $('status').style.color = 'var(--accent-emerald)';
@@ -83,6 +113,9 @@ async function loadData() {
     initSelectors();
     applyTheme(state.theme);
     renderCurrent();
+
+    // Background lazy fetch for event-level details
+    loadEventsInBackground();
   } catch (err) {
     $('status').textContent = '○ sync failed';
     $('status').style.color = 'var(--accent-rose)';
@@ -90,10 +123,30 @@ async function loadData() {
   }
 }
 
-/* ─── Filter Events by Time Range ─── */
+async function loadEventsInBackground() {
+  if (eventsLoaded || eventsLoading) return;
+  eventsLoading = true;
+  try {
+    const eRes = await fetch('/data/usage-events.json?x=' + Date.now()).then((r) => r.json());
+    events = eRes;
+    eventsLoaded = true;
+    if (state.drawerSessionId) {
+      populateDrawerEvents(state.drawerSessionId);
+    }
+    if (deepActiveSession) {
+      populateDeepModalData(deepActiveSession);
+    }
+  } catch (err) {
+    console.warn('Background raw events load skipped:', err);
+  } finally {
+    eventsLoading = false;
+  }
+}
+
+/* ─── Filter Days by Time Range ─── */
 function getCutoffDay(rangeKey) {
   if (rangeKey === 'all') return null;
-  const days = events.map((e) => e.day).filter(Boolean).sort();
+  const days = (summary && summary.by_day ? summary.by_day.map((d) => d.key) : []).sort();
   const maxDay = days.length ? days[days.length - 1] : new Date().toISOString().slice(0, 10);
   const [y, m, d] = maxDay.split('-').map(Number);
   const date = new Date(y, m - 1, d);
@@ -109,26 +162,26 @@ function getCutoffDay(rangeKey) {
   return `${py}-${pm}-${pd}`;
 }
 
-function getFilteredRows() {
+function getFilteredDays() {
+  if (!summary || !summary.by_day) return [];
   const cutoff = getCutoffDay(state.timeRange);
-  if (!cutoff) return events;
-  return events.filter((e) => e.day && e.day >= cutoff);
+  if (!cutoff) return summary.by_day;
+  return summary.by_day.filter((d) => d.key && d.key >= cutoff);
 }
 
-function updateDateRangeBadge(rows) {
-  const days = rows.map((e) => e.day).filter(Boolean).sort();
-  if (!days.length) {
+function updateDateRangeBadge(days) {
+  if (!days || !days.length) {
     $('dateRangeBadge').textContent = 'No data';
     return;
   }
-  const start = formatDateDisplay(days[0]);
-  const end = formatDateDisplay(days[days.length - 1]);
+  const start = formatDateDisplay(days[0].key || days[0]);
+  const end = formatDateDisplay(days[days.length - 1].key || days[days.length - 1]);
   $('dateRangeBadge').textContent = `${start} – ${end}`;
 }
 
 /* ─── Initializer & Event Listeners ─── */
 function initSelectors() {
-  const sources = [...new Set(events.map(sourceKey))].sort();
+  const sources = (summary && summary.by_source ? summary.by_source.map((s) => s.key) : []).sort();
   const sourceOptions = '<option value="all">All sources</option>' +
     sources.map((s) => `<option value="${s}">${formatSourceDisplay(s)}</option>`).join('');
 
@@ -163,21 +216,21 @@ function switchTab(tabId) {
 
 /* ─── Render Dispatcher ─── */
 function renderCurrent() {
-  if (!summary || !events.length) return;
-  const rows = getFilteredRows();
-  updateDateRangeBadge(rows);
+  if (!summary) return;
+  const days = getFilteredDays();
+  updateDateRangeBadge(days);
 
-  if (state.currentTab === 'overview') renderOverview(rows);
-  else if (state.currentTab === 'trends') renderTrends(rows);
-  else if (state.currentTab === 'models') renderModels(rows);
-  else if (state.currentTab === 'sessions') renderSessions(rows);
+  if (state.currentTab === 'overview') renderOverview(days);
+  else if (state.currentTab === 'trends') renderTrends(days);
+  else if (state.currentTab === 'models') renderModels();
+  else if (state.currentTab === 'sessions') renderSessions();
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
    1. OVERVIEW VIEW
    ══════════════════════════════════════════════════════════════════════════ */
 
-function renderOverview(rows) {
+function renderOverview(days) {
   let totalTokens = 0;
   let totalCost = 0;
   let cachedTokens = 0;
@@ -186,43 +239,53 @@ function renderOverview(rows) {
   let reasoningTokens = 0;
   let discountTotal = 0;
 
-  const sessionIds = new Set();
   const sourceTotals = {
     'takomi/pi': 0,
     codex: 0,
     antigravity: 0,
   };
 
-  for (const e of rows) {
-    const t = e.total_tokens || 0;
-    const c = e.cached_input_tokens || 0;
-    const inp = e.input_tokens || 0;
-    const out = e.output_tokens || 0;
-    const cost = e.estimated_cost_usd || 0;
-
-    totalTokens += t;
-    totalCost += cost;
-    cachedTokens += c;
-    outputTokens += out;
-    reasoningTokens += e.reasoning_output_tokens || 0;
-    discountTotal += e.discount_amount_usd || 0;
-
-    const uncache = e.input_includes_cache ? Math.max(0, inp - c) : inp;
-    uncachedTokens += uncache;
-
-    if (e.session_id) sessionIds.add(e.session_id);
-
-    const s = sourceKey(e);
-    if (s === 'takomi/pi') sourceTotals['takomi/pi'] += t;
-    else if (s === 'codex') sourceTotals.codex += t;
-    else if (s === 'antigravity') sourceTotals.antigravity += t;
-    else sourceTotals['takomi/pi'] += t;
+  const isAll = state.timeRange === 'all';
+  if (isAll && summary && summary.totals) {
+    totalTokens = summary.totals.total_tokens || 0;
+    totalCost = summary.totals.estimated_cost_usd || 0;
+    cachedTokens = summary.totals.cached_input_tokens || 0;
+    const inp = summary.totals.input_tokens || 0;
+    uncachedTokens = Math.max(0, inp - cachedTokens);
+    outputTokens = summary.totals.output_tokens || 0;
+    reasoningTokens = summary.totals.reasoning_output_tokens || 0;
+    discountTotal = summary.totals.discount_amount_usd || 0;
+    for (const s of (summary.by_source || [])) {
+      if (s.key in sourceTotals) sourceTotals[s.key] = s.total_tokens || 0;
+    }
+  } else {
+    for (const d of days) {
+      totalTokens += d.total_tokens || 0;
+      totalCost += d.estimated_cost_usd || 0;
+      cachedTokens += d.cached_input_tokens || 0;
+      const inp = d.input_tokens || 0;
+      const c = d.cached_input_tokens || 0;
+      uncachedTokens += Math.max(0, inp - c);
+      outputTokens += d.output_tokens || 0;
+      reasoningTokens += d.reasoning_output_tokens || 0;
+      discountTotal += d.discount_amount_usd || 0;
+      if (d.source_tokens) {
+        sourceTotals['takomi/pi'] += d.source_tokens['takomi/pi'] || 0;
+        sourceTotals['codex'] += d.source_tokens['codex'] || 0;
+        sourceTotals['antigravity'] += d.source_tokens['antigravity'] || 0;
+      }
+    }
   }
+
+  const cutoff = getCutoffDay(state.timeRange);
+  const sessionCount = isAll
+    ? (summary.session_count || (summary.by_session || []).length)
+    : (summary.by_session || []).filter((s) => !cutoff || (s.last_day && s.last_day >= cutoff)).length;
 
   // Hero Card
   $('ovProcessedTokens').textContent = formatTokensCompact(totalTokens);
   $('ovApiCost').textContent = money(totalCost);
-  $('ovSessionCount').textContent = num(sessionIds.size);
+  $('ovSessionCount').textContent = num(sessionCount);
 
   if (discountTotal > 0) {
     $('ovSavingsTag').textContent = `Saved ${money(discountTotal)} from discounts`;
@@ -232,7 +295,7 @@ function renderOverview(rows) {
   }
 
   // Daily Usage Chart with Obvious Dotted Month Demarcations
-  renderOverviewDailyChart(rows, state.overviewMetric);
+  renderOverviewDailyChart(days, state.overviewMetric);
 
   // Sources Breakdown
   const sourcesArr = [
@@ -278,23 +341,20 @@ function renderOverview(rows) {
   $('ovCompOutputPct').textContent = `${oPct}%`;
 }
 
-function renderOverviewDailyChart(rows, metric) {
+function renderOverviewDailyChart(days, metric) {
   $('ovDailyChartUnit').textContent = metric === 'tokens' ? 'Tokens' : 'Estimated cost';
 
-  const dayMap = new Map();
-  for (const e of rows) {
-    if (!e.day) continue;
-    const v = metric === 'tokens' ? (e.total_tokens || 0) : (e.estimated_cost_usd || 0);
-    dayMap.set(e.day, (dayMap.get(e.day) || 0) + v);
-  }
+  const data = (days || [])
+    .map((d) => ({
+      day: d.key || d.day,
+      val: metric === 'tokens' ? (d.total_tokens || 0) : (d.estimated_cost_usd || 0),
+    }))
+    .filter((d) => d.day);
 
-  const sortedDays = [...dayMap.keys()].sort();
-  if (!sortedDays.length) {
+  if (!data.length) {
     $('ovDailySvg').innerHTML = '';
     return;
   }
-
-  const data = sortedDays.map((day) => ({ day, val: dayMap.get(day) }));
   const maxVal = Math.max(...data.map((d) => d.val), 1);
 
   // SVG dimensions
@@ -432,7 +492,7 @@ function renderOverviewDailyChart(rows, metric) {
    2. TRENDS VIEW
    ══════════════════════════════════════════════════════════════════════════ */
 
-function renderTrends(rows) {
+function renderTrends(days) {
   const isMonthly = state.trendsGranularity === 'monthly';
   const isCost = state.trendsMetric === 'cost';
 
@@ -449,19 +509,22 @@ function renderTrends(rows) {
   const antigravityMap = new Map();
   const allBucketMap = new Map();
 
-  for (const e of rows) {
-    const key = isMonthly
-      ? (e.month || (e.day ? e.day.slice(0, 7) : 'unknown'))
-      : (e.day || 'unknown');
+  for (const d of days) {
+    const key = isMonthly ? (d.key ? d.key.slice(0, 7) : 'unknown') : (d.key || 'unknown');
     if (key === 'unknown') continue;
 
-    const val = isCost ? (e.estimated_cost_usd || 0) : (e.total_tokens || 0);
-    allBucketMap.set(key, (allBucketMap.get(key) || 0) + val);
+    const sCost = d.sources || {};
+    const sTok = d.source_tokens || {};
+    const takomiVal = isCost ? (sCost['takomi/pi'] || 0) : (sTok['takomi/pi'] || 0);
+    const codexVal = isCost ? (sCost['codex'] || 0) : (sTok['codex'] || 0);
+    const agVal = isCost ? (sCost['antigravity'] || 0) : (sTok['antigravity'] || 0);
 
-    const s = sourceKey(e);
-    if (s === 'takomi/pi') takomiMap.set(key, (takomiMap.get(key) || 0) + val);
-    else if (s === 'codex') codexMap.set(key, (codexMap.get(key) || 0) + val);
-    else if (s === 'antigravity') antigravityMap.set(key, (antigravityMap.get(key) || 0) + val);
+    takomiMap.set(key, (takomiMap.get(key) || 0) + takomiVal);
+    codexMap.set(key, (codexMap.get(key) || 0) + codexVal);
+    antigravityMap.set(key, (antigravityMap.get(key) || 0) + agVal);
+
+    const totalVal = isCost ? (d.estimated_cost_usd || 0) : (d.total_tokens || 0);
+    allBucketMap.set(key, (allBucketMap.get(key) || 0) + totalVal);
   }
 
   const buckets = [...allBucketMap.keys()].sort();
@@ -473,19 +536,14 @@ function renderTrends(rows) {
   let dailySum = 0;
   let dailyCount = 0;
 
-  const dayTotals = new Map();
-  for (const e of rows) {
-    if (!e.day) continue;
-    const v = e.estimated_cost_usd || 0;
-    dayTotals.set(e.day, (dayTotals.get(e.day) || 0) + v);
-  }
-
-  for (const [d, v] of dayTotals.entries()) {
+  for (const d of days) {
+    if (!d.key) continue;
+    const v = d.estimated_cost_usd || 0;
     dailySum += v;
     dailyCount++;
     if (v > peakVal) {
       peakVal = v;
-      peakDay = d;
+      peakDay = d.key;
     }
   }
 
@@ -494,7 +552,7 @@ function renderTrends(rows) {
   $('trendsDailyAvgVal').textContent = dailyCount > 0 ? money(dailySum / dailyCount) : '$0.00';
 
   // Monthly Column Bars
-  renderTrendsMonthlyColumns(rows);
+  renderTrendsMonthlyColumns(days);
 }
 
 function renderTrendsMultiChart(buckets, s1Map, s2Map, s3Map, isCost, isMonthly) {
@@ -655,12 +713,19 @@ function renderTrendsMultiChart(buckets, s1Map, s2Map, s3Map, isCost, isMonthly)
   };
 }
 
-function renderTrendsMonthlyColumns(rows) {
+function renderTrendsMonthlyColumns(days) {
   const monthMap = new Map();
-  for (const e of rows) {
-    const m = e.month || (e.day ? e.day.slice(0, 7) : 'unknown');
-    if (m === 'unknown') continue;
-    monthMap.set(m, (monthMap.get(m) || 0) + (e.estimated_cost_usd || 0));
+  for (const d of days) {
+    if (!d.key) continue;
+    const m = d.key.slice(0, 7);
+    monthMap.set(m, (monthMap.get(m) || 0) + (d.estimated_cost_usd || 0));
+  }
+
+  // Fallback to summary.by_month if days array is small
+  if (!monthMap.size && summary && summary.by_month) {
+    for (const mObj of summary.by_month) {
+      if (mObj.key) monthMap.set(mObj.key, mObj.estimated_cost_usd || 0);
+    }
   }
 
   const sortedMonths = [...monthMap.keys()].sort();
@@ -695,52 +760,45 @@ function renderTrendsMonthlyColumns(rows) {
    3. MODELS VIEW
    ══════════════════════════════════════════════════════════════════════════ */
 
-function renderModels(rows) {
+function renderModels() {
   const src = state.modelsSource;
   const q = state.modelsSearch.toLowerCase();
+  const rawModels = (summary && summary.by_model) || [];
 
-  const modelMap = new Map();
   let totalCost = 0;
+  const modelList = [];
 
-  for (const e of rows) {
-    if (src !== 'all' && sourceKey(e) !== src) continue;
-    const m = e.model || 'unknown';
-    if (q && !m.toLowerCase().includes(q)) continue;
+  for (const m of rawModels) {
+    const modelName = m.key || 'unknown';
+    if (q && !modelName.toLowerCase().includes(q)) continue;
 
-    const cost = e.estimated_cost_usd || 0;
-    const tokens = e.total_tokens || 0;
-    const cached = e.cached_input_tokens || 0;
-    const inp = e.input_tokens || 0;
-    const out = e.output_tokens || 0;
-    const reasoning = e.reasoning_output_tokens || 0;
-    const uncache = e.input_includes_cache ? Math.max(0, inp - cached) : inp;
+    const sourcesObj = m.sources || {};
+    if (src !== 'all' && !(sourcesObj[src] > 0)) continue;
+
+    const cost = src === 'all' ? (m.estimated_cost_usd || 0) : (sourcesObj[src] || 0);
+    const tokens = m.total_tokens || 0;
+    const cached = m.cached_input_tokens || 0;
+    const inp = m.input_tokens || 0;
+    const uncached = Math.max(0, inp - cached);
+    const out = m.output_tokens || 0;
+    const reasoning = m.reasoning_output_tokens || 0;
 
     totalCost += cost;
 
-    if (!modelMap.has(m)) {
-      modelMap.set(m, {
-        model: m,
-        cost: 0,
-        tokens: 0,
-        cached: 0,
-        uncached: 0,
-        output: 0,
-        reasoning: 0,
-        events: 0,
-      });
-    }
-
-    const item = modelMap.get(m);
-    item.cost += cost;
-    item.tokens += tokens;
-    item.cached += cached;
-    item.uncached += uncache;
-    item.output += out;
-    item.reasoning += reasoning;
-    item.events++;
+    modelList.push({
+      model: modelName,
+      cost,
+      tokens,
+      cached,
+      uncached,
+      output: out,
+      reasoning,
+      events: m.events || 0,
+      sources: sourcesObj,
+    });
   }
 
-  const modelList = [...modelMap.values()].sort((a, b) => b.cost - a.cost);
+  modelList.sort((a, b) => b.cost - a.cost);
 
   $('modelsAccordionList').innerHTML = modelList
     .map((item) => {
@@ -810,108 +868,264 @@ function renderModels(rows) {
       const wrap = row.closest('.model-row-wrap');
       const m = wrap.dataset.model;
       state.expandedModel = state.expandedModel === m ? null : m;
-      renderModels(rows);
+      renderModels();
     });
   });
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   4. SESSIONS VIEW
+   4. SESSIONS VIEW & PROJECT GROUPING
    ══════════════════════════════════════════════════════════════════════════ */
 
-function renderSessions(rows) {
-  const src = state.sessionsSource;
+function renderSessions() {
+  const isProjectMode = state.sessionsViewMode === 'projects';
   const q = state.sessionsSearch.toLowerCase();
+  const src = state.sessionsSource;
   const sort = state.sessionsSort;
+  const cutoff = getCutoffDay(state.timeRange);
 
-  // Session Aggregator
-  const sessionMap = new Map();
-
-  for (const e of rows) {
-    if (src !== 'all' && sourceKey(e) !== src) continue;
-    const sid = e.session_id || 'unknown';
-    if (q && !JSON.stringify([sid, e.model, e.file, sourceKey(e)]).toLowerCase().includes(q)) {
-      continue;
+  // Manage Project Filter Banner
+  const banner = $('sessionsProjectFilterBanner');
+  if (banner) {
+    if (!isProjectMode && state.sessionsProjectFilter) {
+      banner.style.display = 'flex';
+      banner.innerHTML = `
+        <div>
+          <span>Filtering by project:</span>
+          <strong class="filter-tag">${state.sessionsProjectFilter}</strong>
+        </div>
+        <div class="filter-actions">
+          <button class="filter-btn" id="bannerBackToProjectsBtn">&larr; Back to Group by Project</button>
+          <button class="filter-btn" id="bannerClearFilterBtn">&times; Show all projects</button>
+        </div>
+      `;
+      $('bannerBackToProjectsBtn').onclick = () => {
+        state.sessionsProjectFilter = null;
+        state.sessionsViewMode = 'projects';
+        $('viewBtnProjects').classList.add('active');
+        $('viewBtnSessions').classList.remove('active');
+        renderSessions();
+      };
+      $('bannerClearFilterBtn').onclick = () => {
+        state.sessionsProjectFilter = null;
+        renderSessions();
+      };
+    } else {
+      banner.style.display = 'none';
+      banner.innerHTML = '';
     }
-
-    if (!sessionMap.has(sid)) {
-      sessionMap.set(sid, {
-        session_id: sid,
-        source: sourceKey(e),
-        cost: 0,
-        tokens: 0,
-        events: 0,
-        day: e.day || '',
-        lastDay: e.day || '',
-        models: new Map(),
-        file: e.file || '',
-        records: [],
-      });
-    }
-
-    const sObj = sessionMap.get(sid);
-    const cost = e.estimated_cost_usd || 0;
-    sObj.cost += cost;
-    sObj.tokens += e.total_tokens || 0;
-    sObj.events++;
-    sObj.records.push(e);
-
-    if (e.day && (!sObj.day || e.day < sObj.day)) sObj.day = e.day;
-    if (e.day && (!sObj.lastDay || e.day > sObj.lastDay)) sObj.lastDay = e.day;
-
-    const m = e.model || 'unknown';
-    sObj.models.set(m, (sObj.models.get(m) || 0) + cost);
-    if (!sObj.file && e.file) sObj.file = e.file;
   }
 
-  let sessionList = [...sessionMap.values()];
+  if (isProjectMode) {
+    renderProjectGroupedList(q, src, sort);
+  } else {
+    renderIndividualSessionsList(q, src, sort, cutoff);
+  }
+}
+
+function renderIndividualSessionsList(q, src, sort, cutoff) {
+  const rawSessions = (summary && summary.by_session) || [];
+  let sessionList = [];
+
+  for (const s of rawSessions) {
+    if (src !== 'all' && s.source !== src && s.source_detail !== src) continue;
+    if (cutoff && s.last_day && s.last_day < cutoff) continue;
+    if (state.sessionsProjectFilter && s.project !== state.sessionsProjectFilter) continue;
+
+    if (q) {
+      const hay = `${s.session_id} ${s.project} ${s.directory} ${s.primary_model} ${s.file} ${s.source}`.toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+
+    sessionList.push(s);
+  }
 
   // Sort
-  if (sort === 'cost-desc') sessionList.sort((a, b) => b.cost - a.cost);
-  else if (sort === 'date-desc') sessionList.sort((a, b) => (b.lastDay || '').localeCompare(a.lastDay || ''));
-  else if (sort === 'tokens-desc') sessionList.sort((a, b) => b.tokens - a.tokens);
+  if (sort === 'cost-desc') sessionList.sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0));
+  else if (sort === 'date-desc') sessionList.sort((a, b) => (b.last_day || '').localeCompare(a.last_day || ''));
+  else if (sort === 'tokens-desc') sessionList.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
 
-  // Top Session Selection
+  // Auto-selection
   if (!state.selectedSessionId && sessionList.length) {
     state.selectedSessionId = sessionList[0].session_id;
-  } else if (state.selectedSessionId && !sessionMap.has(state.selectedSessionId) && sessionList.length) {
+  } else if (state.selectedSessionId && !sessionList.some((s) => s.session_id === state.selectedSessionId) && sessionList.length) {
     state.selectedSessionId = sessionList[0].session_id;
   }
 
-  // Render Session Cards
-  $('sessionsList').innerHTML = sessionList
-    .slice(0, 100)
+  // Ensure active session is within the rendered slice
+  const selIdx = sessionList.findIndex((s) => s.session_id === state.selectedSessionId);
+  if (selIdx >= state.sessionsVisibleCount) {
+    state.sessionsVisibleCount = Math.min(sessionList.length, selIdx + 50);
+  }
+  const visibleSessions = sessionList.slice(0, state.sessionsVisibleCount);
+  const hasMore = sessionList.length > state.sessionsVisibleCount;
+
+  // Render cards
+  const cardsHtml = visibleSessions
     .map((s) => {
       const isSelected = s.session_id === state.selectedSessionId;
       const shortId = s.session_id.length > 12 ? s.session_id.slice(0, 10) + '…' : s.session_id;
-      const dateDisp = formatDateDisplay(s.lastDay || s.day);
+      const dateDisp = formatDateDisplay(s.last_day || s.first_day);
+      const projName = s.project || 'Unknown Project';
 
       return `
       <div class="session-card-item ${isSelected ? 'selected' : ''}" data-session="${s.session_id}">
-        <div class="sess-id-col">
-          <div class="sess-id">${shortId}</div>
-          <div class="sess-date">${dateDisp}</div>
+        <div class="sess-main-col">
+          <div class="sess-project-row">
+            <svg class="sess-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span class="sess-project-name" title="${projName}">${projName}</span>
+          </div>
+          <div class="sess-meta-row">
+            <span class="sess-id">${shortId}</span>
+            <span>·</span>
+            <span>${dateDisp}</span>
+            <span class="sess-source-pill">${formatSourceDisplay(s.source)}</span>
+          </div>
         </div>
-        <div class="sess-source-col">${formatSourceDisplay(s.source)}</div>
-        <div class="sess-cost-col">${money(s.cost)}</div>
-        <div class="sess-tokens-col">${formatTokensCompact(s.tokens)}</div>
-        <div class="sess-arrow-col">&rsaquo;</div>
+        <div class="sess-right-col">
+          <div class="sess-cost-val">${money(s.estimated_cost_usd)}</div>
+          <div class="sess-tokens-val">${formatTokensCompact(s.total_tokens)}</div>
+        </div>
       </div>
     `;
     })
-    .join('') || '<p style="padding:24px; color:var(--text-dim)">No sessions found.</p>';
+    .join('');
+
+  const footerHtml = hasMore
+    ? `
+    <div class="sessions-load-footer">
+      <span>Showing ${visibleSessions.length} of ${num(sessionList.length)} sessions</span>
+      <div style="display:flex; gap:6px">
+        <button class="secondary-btn" id="loadMoreSessionsBtn" style="font-size:11px; padding:4px 10px">Load 100 more</button>
+        <button class="secondary-btn" id="loadAllSessionsBtn" style="font-size:11px; padding:4px 10px">Load all (${num(sessionList.length)})</button>
+      </div>
+    </div>
+  `
+    : (sessionList.length > 0
+      ? `
+    <div style="text-align:center; padding:16px 0; font-size:11px; color:var(--text-dim)">
+      All ${num(sessionList.length)} sessions loaded
+    </div>
+  `
+      : '');
+
+  $('sessionsList').innerHTML = (cardsHtml + footerHtml) || '<p style="padding:24px; color:var(--text-dim)">No sessions found.</p>';
 
   // Bind Card Click
   $('sessionsList').querySelectorAll('.session-card-item').forEach((card) => {
     card.addEventListener('click', () => {
       state.selectedSessionId = card.dataset.session;
-      renderSessions(rows);
+      renderIndividualSessionsList(q, src, sort, cutoff);
+    });
+  });
+
+  // Bind Load More buttons
+  if ($('loadMoreSessionsBtn')) {
+    $('loadMoreSessionsBtn').onclick = () => {
+      state.sessionsVisibleCount += 100;
+      renderIndividualSessionsList(q, src, sort, cutoff);
+    };
+  }
+  if ($('loadAllSessionsBtn')) {
+    $('loadAllSessionsBtn').onclick = () => {
+      state.sessionsVisibleCount = sessionList.length;
+      renderIndividualSessionsList(q, src, sort, cutoff);
+    };
+  }
+
+  // Infinite Scroll Listener
+  const listEl = $('sessionsList');
+  listEl.onscroll = () => {
+    if (hasMore && listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 300) {
+      state.sessionsVisibleCount += 100;
+      renderIndividualSessionsList(q, src, sort, cutoff);
+    }
+  };
+
+  // Render Inspector
+  const selectedObj = rawSessions.find((s) => s.session_id === state.selectedSessionId) || sessionList[0];
+  renderSessionInspector(selectedObj);
+
+  // Auto-scroll to highlighted session card
+  setTimeout(() => {
+    const activeCard = $('sessionsList').querySelector('.session-card-item.selected');
+    if (activeCard) {
+      activeCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, 40);
+}
+
+function renderProjectGroupedList(q, src, sort) {
+  const rawProjects = (summary && summary.by_project) || [];
+  let projectList = [];
+
+  for (const p of rawProjects) {
+    if (q) {
+      const hay = `${p.project} ${p.directory}`.toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+    projectList.push(p);
+  }
+
+  // Sort
+  if (sort === 'cost-desc') projectList.sort((a, b) => (b.estimated_cost_usd || 0) - (a.estimated_cost_usd || 0));
+  else if (sort === 'date-desc') projectList.sort((a, b) => (b.last_day || '').localeCompare(a.last_day || ''));
+  else if (sort === 'tokens-desc') projectList.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+
+  // Auto-selection
+  if (!state.selectedProjectId && projectList.length) {
+    state.selectedProjectId = projectList[0].project;
+  } else if (state.selectedProjectId && !projectList.some((p) => p.project === state.selectedProjectId) && projectList.length) {
+    state.selectedProjectId = projectList[0].project;
+  }
+
+  // Render cards
+  $('sessionsList').innerHTML = projectList
+    .map((p) => {
+      const isSelected = p.project === state.selectedProjectId;
+      return `
+      <div class="project-card-item ${isSelected ? 'selected' : ''}" data-project="${p.project}">
+        <div class="sess-main-col">
+          <div class="proj-title-row">
+            <svg class="sess-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span class="proj-title">${p.project}</span>
+            <span class="proj-sessions-count">${num(p.sessions_count)} sessions</span>
+          </div>
+          <div class="proj-dir" title="${p.directory || ''}">${p.directory || '—'}</div>
+        </div>
+        <div class="sess-right-col">
+          <div class="sess-cost-val">${money(p.estimated_cost_usd)}</div>
+          <div class="sess-tokens-val">${formatTokensCompact(p.total_tokens)}</div>
+        </div>
+      </div>
+    `;
+    })
+    .join('') || '<p style="padding:24px; color:var(--text-dim)">No projects found.</p>';
+
+  // Bind Card Click
+  $('sessionsList').querySelectorAll('.project-card-item').forEach((card) => {
+    card.addEventListener('click', () => {
+      state.selectedProjectId = card.dataset.project;
+      state.projectSessionsSearch = '';
+      renderProjectGroupedList(q, src, sort);
     });
   });
 
   // Render Inspector
-  const selectedObj = sessionMap.get(state.selectedSessionId);
-  renderSessionInspector(selectedObj);
+  const selectedProj = rawProjects.find((p) => p.project === state.selectedProjectId) || projectList[0];
+  renderProjectInspector(selectedProj);
+
+  // Auto-scroll to highlighted project card
+  setTimeout(() => {
+    const activeProj = $('sessionsList').querySelector('.project-card-item.selected');
+    if (activeProj) {
+      activeProj.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, 40);
 }
 
 function renderSessionInspector(session) {
@@ -921,41 +1135,60 @@ function renderSessionInspector(session) {
     return;
   }
 
-  // Top model
-  let topModel = '—';
-  let topModelCost = -1;
-  for (const [m, c] of session.models.entries()) {
-    if (c > topModelCost) {
-      topModelCost = c;
-      topModel = m;
-    }
-  }
+  const projName = session.project || 'Unknown Project';
+  const projDir = session.directory || '';
+  const dateDisp = formatDateDisplay(session.last_day || session.first_day);
+  const shortId = session.session_id.length > 16 ? session.session_id.slice(0, 14) + '…' : session.session_id;
 
   inspector.innerHTML = `
-    <div class="inspector-cost-val">${money(session.cost)}</div>
+    <div class="inspector-project-banner">
+      <div class="inspector-project-header">
+        <div class="inspector-project-title" title="${projName}">
+          <svg class="sess-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>${projName}</span>
+        </div>
+        ${projDir ? `<button class="copy-mini-btn" id="copyProjPathBtn" title="Copy folder path">Copy path</button>` : ''}
+      </div>
+      <div class="inspector-project-path">${projDir || 'No directory path recorded'}</div>
+    </div>
+
+    <div class="inspector-cost-val">${money(session.estimated_cost_usd)}</div>
     <div class="inspector-cost-sub">Estimated API cost</div>
 
     <div class="inspector-meta-grid">
       <div class="inspector-meta-label">Date</div>
-      <div class="inspector-meta-val">${formatDateDisplay(session.lastDay || session.day)}</div>
+      <div class="inspector-meta-val">${dateDisp}</div>
+
       <div class="inspector-meta-label">Source</div>
       <div class="inspector-meta-val">${formatSourceDisplay(session.source)}</div>
+
       <div class="inspector-meta-label">Primary model</div>
-      <div class="inspector-meta-val"><code>${topModel}</code></div>
+      <div class="inspector-meta-val"><code>${session.primary_model || '—'}</code></div>
+
+      <div class="inspector-meta-label">Session ID</div>
+      <div class="inspector-meta-val" style="display:flex; align-items:center; gap:6px">
+        <code title="${session.session_id}">${shortId}</code>
+        <button class="copy-mini-btn" id="copySessionIdBtn" title="Copy full ID">Copy</button>
+      </div>
     </div>
 
     <div class="inspector-tokens-row">
       <div class="inspector-tokens-col">
-        <div class="num">${formatTokensCompact(session.tokens)}</div>
+        <div class="num">${formatTokensCompact(session.total_tokens)}</div>
         <div class="lbl">tokens</div>
       </div>
       <div class="inspector-tokens-col">
         <div class="num">${num(session.events)}</div>
-        <div class="lbl">events</div>
+        <div class="lbl">calls</div>
       </div>
     </div>
 
-    <div class="session-activity-header">Session activity</div>
+    <div class="inspector-activity-header-row">
+      <div class="session-activity-header">Session activity</div>
+      <button class="expand-chart-btn" id="expandChartBtn" title="Enlarge timeline">Expand ⤢</button>
+    </div>
     <div class="session-activity-box" id="sessActivityWrap">
       <svg id="sessActivitySvg" width="100%" height="100%"></svg>
     </div>
@@ -963,22 +1196,41 @@ function renderSessionInspector(session) {
     <button class="view-events-btn" id="openDrawerBtn">View events &rarr;</button>
 
     <button class="file-pricing-details-toggle" id="toggleFileDetailsBtn">
-      <span>File &amp; pricing details</span>
+      <span>File &amp; session details</span>
       <span id="fileDetailsChevron">&rsaquo;</span>
     </button>
     <div class="file-pricing-content" id="fileDetailsContent">
-      <p style="margin-bottom:6px"><strong>File:</strong><br/>${session.file || '—'}</p>
-      <p><strong>Session ID:</strong><br/>${session.session_id}</p>
+      <div style="margin-bottom:8px">
+        <strong>Log File:</strong><br/>
+        <div style="display:flex; align-items:flex-start; gap:6px; margin-top:4px">
+          <span style="word-break:break-all; flex:1">${session.file || '—'}</span>
+          ${session.file ? `<button class="copy-mini-btn" id="copyFilePathBtn">Copy</button>` : ''}
+        </div>
+      </div>
+      <div>
+        <strong>Full Session ID:</strong><br/>
+        <code style="word-break:break-all">${session.session_id}</code>
+      </div>
     </div>
   `;
 
-  // Draw Activity Timeline
-  renderSessionActivityTimeline(session.records);
+  // Draw sparkline timeline
+  renderSessionActivityTimeline(session.activity || []);
 
-  // Bind Drawer Button
-  $('openDrawerBtn').onclick = () => openSessionEventsDrawer(session);
+  // Bind Buttons
+  if (projDir && $('copyProjPathBtn')) {
+    $('copyProjPathBtn').onclick = () => copyText(projDir, $('copyProjPathBtn'), 'Copy path');
+  }
+  if ($('copySessionIdBtn')) {
+    $('copySessionIdBtn').onclick = () => copyText(session.session_id, $('copySessionIdBtn'), 'Copy');
+  }
+  if (session.file && $('copyFilePathBtn')) {
+    $('copyFilePathBtn').onclick = () => copyText(session.file, $('copyFilePathBtn'), 'Copy');
+  }
+  $('expandChartBtn').onclick = () => openDeepSessionModal(session);
+  $('openDrawerBtn').onclick = () => openDeepSessionModal(session);
 
-  // Bind Accordion Toggle
+  // Accordion Toggle
   $('toggleFileDetailsBtn').onclick = () => {
     const box = $('fileDetailsContent');
     box.classList.toggle('open');
@@ -986,9 +1238,153 @@ function renderSessionInspector(session) {
   };
 }
 
-function renderSessionActivityTimeline(records) {
+function renderProjectInspector(project) {
+  const inspector = $('sessionInspector');
+  if (!project) {
+    inspector.innerHTML = '<p style="color:var(--text-dim); padding:24px">Select a project to inspect.</p>';
+    return;
+  }
+
+  const projName = project.project || 'Unknown Project';
+  const projDir = project.directory || '';
+  const dateDisp = formatDateDisplay(project.last_day);
+
+  // Find all sessions for this project from by_session
+  const allProjectSessions = ((summary && summary.by_session) || []).filter((s) => s.project === projName);
+
+  // Apply project-level sessions search if any
+  const q = (state.projectSessionsSearch || '').toLowerCase().trim();
+  const projectSessions = q
+    ? allProjectSessions.filter((s) => `${s.session_id} ${s.primary_model} ${s.first_day} ${s.last_day}`.toLowerCase().includes(q))
+    : allProjectSessions;
+
+  inspector.innerHTML = `
+    <div class="project-inspector-wrap">
+      <div class="project-inspector-top">
+        <div class="inspector-project-banner" style="margin-bottom:0">
+          <div class="inspector-project-header">
+            <div class="inspector-project-title" title="${projName}">
+              <svg class="sess-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              </svg>
+              <span>${projName}</span>
+            </div>
+            ${projDir ? `<button class="copy-mini-btn" id="copyProjPathBtn" title="Copy folder path">Copy path</button>` : ''}
+          </div>
+          <div class="inspector-project-path">${projDir || 'No directory path recorded'}</div>
+        </div>
+
+        <div class="inspector-kpi-grid">
+          <div class="inspector-kpi-card">
+            <div class="inspector-kpi-label">Project Cost</div>
+            <div class="inspector-kpi-val" style="color:var(--accent-orange)">${money(project.estimated_cost_usd)}</div>
+          </div>
+          <div class="inspector-kpi-card">
+            <div class="inspector-kpi-label">Total Tokens</div>
+            <div class="inspector-kpi-val">${formatTokensCompact(project.total_tokens)}</div>
+          </div>
+          <div class="inspector-kpi-card">
+            <div class="inspector-kpi-label">Sessions</div>
+            <div class="inspector-kpi-val">${num(allProjectSessions.length || project.sessions_count)}</div>
+          </div>
+          <div class="inspector-kpi-card">
+            <div class="inspector-kpi-label">Total Calls</div>
+            <div class="inspector-kpi-val">${num(project.events)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="project-sessions-box">
+        <div class="project-sessions-box-header">
+          <div style="font-weight:600; font-size:13px; color:var(--text-main); display:flex; align-items:center; gap:6px">
+            <span>Sessions (${num(allProjectSessions.length)})</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px">
+            <input type="text" id="projectSessionsSearch" class="project-sessions-filter-input" placeholder="Search sessions…" value="${state.projectSessionsSearch || ''}" />
+            <button class="project-filter-pill-btn" id="filterSessionsTabBtn" title="Show these sessions in main Sessions list">
+              Filter Sessions tab &rarr;
+            </button>
+          </div>
+        </div>
+
+        <div class="project-sessions-scroll-list" id="projectSessionsScroll">
+          ${projectSessions.map((s) => {
+            const shortId = s.session_id.length > 14 ? s.session_id.slice(0, 12) + '…' : s.session_id;
+            const sessDate = formatDateDisplay(s.last_day || s.first_day);
+            const callsCount = s.events || (s.activity ? s.activity.length : 0);
+            return `
+              <div class="project-session-card" data-sess-id="${s.session_id}">
+                <div style="min-width:0; flex:1">
+                  <div style="display:flex; align-items:center; gap:8px">
+                    <code style="font-size:12px; font-weight:700; color:var(--text-main)" title="${s.session_id}">${shortId}</code>
+                    <span class="sess-source-pill" style="font-size:10px">${s.primary_model || '—'}</span>
+                  </div>
+                  <div style="font-size:11px; color:var(--text-muted); margin-top:3px">
+                    ${sessDate} · ${num(callsCount)} calls
+                  </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:12px">
+                  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:1px">
+                    <div style="font-size:13px; font-weight:700; color:var(--accent-orange)">${money(s.estimated_cost_usd)}</div>
+                    <div style="font-size:11px; color:var(--text-muted)">${formatTokensCompact(s.total_tokens)}</div>
+                  </div>
+                  <button class="copy-mini-btn inspect-session-btn" data-sess-id="${s.session_id}" title="Inspect full session timeline and calls">Inspect ⤢</button>
+                </div>
+              </div>
+            `;
+          }).join('') || '<p style="padding:24px; text-align:center; color:var(--text-dim); font-size:12px">No matching sessions found in this project.</p>'}
+        </div>
+      </div>
+    </div>
+  `;
+
+  if (projDir && $('copyProjPathBtn')) {
+    $('copyProjPathBtn').onclick = () => copyText(projDir, $('copyProjPathBtn'), 'Copy path');
+  }
+
+  // Bind project sessions search input
+  const searchInput = $('projectSessionsSearch');
+  if (searchInput) {
+    searchInput.oninput = (e) => {
+      state.projectSessionsSearch = e.target.value;
+      renderProjectInspector(project);
+      const inputAfter = $('projectSessionsSearch');
+      if (inputAfter) {
+        inputAfter.focus();
+        inputAfter.selectionStart = inputAfter.selectionEnd = inputAfter.value.length;
+      }
+    };
+  }
+
+  // Bind Filter Sessions Tab button
+  if ($('filterSessionsTabBtn')) {
+    $('filterSessionsTabBtn').onclick = () => {
+      state.sessionsProjectFilter = projName;
+      state.sessionsViewMode = 'sessions';
+      state.sessionsVisibleCount = 100;
+      $('viewBtnSessions').classList.add('active');
+      $('viewBtnProjects').classList.remove('active');
+      renderSessions();
+    };
+  }
+
+  // Bind click on session cards and Inspect buttons to open deep inspector modal
+  inspector.querySelectorAll('.project-session-card').forEach((card) => {
+    const sessId = card.dataset.sessId;
+    const sess = allProjectSessions.find((s) => s.session_id === sessId);
+    card.onclick = () => {
+      if (sess) openDeepSessionModal(sess);
+    };
+  });
+}
+
+
+function renderSessionActivityTimeline(activity) {
   const svg = $('sessActivitySvg');
-  if (!svg || !records || !records.length) return;
+  if (!svg || !activity || !activity.length) {
+    if (svg) svg.innerHTML = '';
+    return;
+  }
 
   const w = svg.clientWidth || 350;
   const h = svg.clientHeight || 90;
@@ -996,18 +1392,13 @@ function renderSessionActivityTimeline(records) {
   const plotW = w - pad * 2;
   const plotH = h - pad * 2;
 
-  const pts = records.map((r, i) => {
-    const cost = r.estimated_cost_usd || 0.0001;
-    return { idx: i, cost };
-  });
+  const maxC = Math.max(...activity.map((p) => p.cost || 0), 0.001);
 
-  const maxC = Math.max(...pts.map((p) => p.cost), 0.001);
-
-  const bars = pts.map((p, i) => {
-    const x = pad + (i / Math.max(1, pts.length - 1)) * plotW;
-    const barH = Math.max(2, (p.cost / maxC) * plotH);
+  const bars = activity.map((p, i) => {
+    const x = pad + (i / Math.max(1, activity.length - 1)) * plotW;
+    const barH = Math.max(3, ((p.cost || 0) / maxC) * plotH);
     const y = h - pad - barH;
-    return `<rect x="${x - 1}" y="${y}" width="2.5" height="${barH}" fill="var(--accent-cyan)" rx="1"/>`;
+    return `<rect x="${x - 1.25}" y="${y}" width="2.5" height="${barH}" fill="var(--accent-cyan)" rx="1"/>`;
   });
 
   svg.innerHTML = `
@@ -1016,44 +1407,315 @@ function renderSessionActivityTimeline(records) {
   `;
 }
 
-function openSessionEventsDrawer(session) {
-  state.drawerSessionId = session.session_id;
-  $('drawerSessionTitle').textContent = `Session: ${session.session_id.slice(0, 12)}…`;
-  $('drawerSessionSub').textContent = `${session.records.length} calls · ${money(session.cost)} total`;
+/* ══════════════════════════════════════════════════════════════════════════
+   5. UNIFIED IN-DEPTH SESSION INSPECTOR MODAL
+   ══════════════════════════════════════════════════════════════════════════ */
 
-  $('drawerEventsList').innerHTML = `
-    <table class="modal-table-wrap" style="width:100%">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Model</th>
-          <th>Tokens</th>
-          <th>Cost</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${session.records
-          .map((r) => {
-            const time = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '—';
-            return `
-            <tr>
-              <td>${time}</td>
-              <td><code>${r.model}</code></td>
-              <td>${formatTokensCompact(r.total_tokens)}</td>
-              <td style="color:var(--accent-orange); font-weight:600">${money(r.estimated_cost_usd)}</td>
-            </tr>
-          `;
-          })
-          .join('')}
-      </tbody>
-    </table>
+let deepActiveSession = null;
+let deepMetricMode = 'cost'; // 'cost' or 'tokens'
+let deepCallsList = [];
+let deepActiveCallIdx = null;
+let deepCoords = [];
+
+function openDeepSessionModal(session) {
+  if (!session) return;
+  deepActiveSession = session;
+  state.drawerSessionId = session.session_id;
+
+  const projName = session.project || 'General Project';
+  const dateDisp = formatDateDisplay(session.last_day || session.first_day);
+  const fileName = session.file ? session.file.split(/[\\/]/).pop() : '';
+
+  if ($('deepSessionSource')) {
+    $('deepSessionSource').textContent = session.source || 'Session';
+  }
+  if ($('deepProjectBadge')) {
+    $('deepProjectBadge').textContent = projName;
+  }
+  if ($('deepSessionId')) {
+    $('deepSessionId').textContent = session.session_id;
+  }
+  if ($('deepCopyIdBtn')) {
+    $('deepCopyIdBtn').onclick = () => copyText(session.session_id, $('deepCopyIdBtn'), 'Copy');
+  }
+  if ($('deepSessionSub')) {
+    $('deepSessionSub').textContent = `${dateDisp}${fileName ? ` · ${fileName}` : ''}`;
+  }
+
+  // 4 Top Metric Cards
+  if ($('deepSessionMetrics')) {
+    const costVal = session.estimated_cost_usd ?? session.cost ?? 0;
+    const tokensVal = session.total_tokens ?? session.tokens ?? 0;
+    const callsVal = session.events ?? session.records?.length ?? (session.activity ? session.activity.length : 0);
+
+    $('deepSessionMetrics').innerHTML = `
+      <div class="modal-metric-card">
+        <div class="modal-metric-label">Estimated API cost</div>
+        <div class="modal-metric-val" style="color:var(--accent-orange)">${money(costVal)}</div>
+      </div>
+      <div class="modal-metric-card">
+        <div class="modal-metric-label">Total processed tokens</div>
+        <div class="modal-metric-val">${formatTokensCompact(tokensVal)}</div>
+      </div>
+      <div class="modal-metric-card">
+        <div class="modal-metric-label">Indexed API calls</div>
+        <div class="modal-metric-val">${num(callsVal)}</div>
+      </div>
+      <div class="modal-metric-card">
+        <div class="modal-metric-label">Primary model</div>
+        <div class="modal-metric-val" style="font-size:14px; font-family:var(--font-mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">${session.primary_model || '—'}</div>
+      </div>
+    `;
+  }
+
+  populateDeepModalData(session);
+  $('sessionDeepModal').style.display = 'flex';
+}
+
+function populateDeepModalData(session) {
+  if (!session) return;
+
+  // Extract calls list: check full raw events first, fallback to session.activity
+  let calls = [];
+  if (eventsLoaded && events.length) {
+    const rawMatches = events.filter((e) => e.session_id === session.session_id);
+    if (rawMatches.length) {
+      calls = rawMatches.map((r, i) => ({
+        idx: i + 1,
+        time: r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '—',
+        rawTs: r.timestamp,
+        model: r.model || session.primary_model || '—',
+        tokens: r.total_tokens ?? 0,
+        cost: r.estimated_cost_usd ?? 0,
+      }));
+    }
+  }
+
+  if (!calls.length && session.activity && session.activity.length) {
+    calls = session.activity.map((r, i) => ({
+      idx: i + 1,
+      time: r.ts ? new Date(r.ts).toLocaleTimeString() : `Call #${i + 1}`,
+      rawTs: r.ts,
+      model: r.model || session.primary_model || '—',
+      tokens: r.tokens ?? 0,
+      cost: r.cost ?? 0,
+    }));
+  }
+
+  if (!calls.length) {
+    calls = [{
+      idx: 1,
+      time: formatDateDisplay(session.last_day || session.first_day),
+      rawTs: null,
+      model: session.primary_model || '—',
+      tokens: session.total_tokens ?? 0,
+      cost: session.estimated_cost_usd ?? session.cost ?? 0,
+    }];
+  }
+
+  deepCallsList = calls;
+  if ($('deepCallCountBadge')) {
+    $('deepCallCountBadge').textContent = `${num(deepCallsList.length)} calls`;
+  }
+
+  // Populate Ledger Table
+  const tbody = $('deepCallsTbody');
+  if (tbody) {
+    tbody.innerHTML = deepCallsList.map((c) => `
+      <tr class="deep-call-row" data-idx="${c.idx}">
+        <td><span style="font-family:var(--font-mono); color:var(--text-dim)">#${c.idx}</span></td>
+        <td style="white-space:nowrap">${c.time}</td>
+        <td><code>${c.model}</code></td>
+        <td>${formatTokensCompact(c.tokens)}</td>
+        <td style="color:var(--accent-orange); font-weight:600">${money(c.cost)}</td>
+      </tr>
+    `).join('');
+
+    tbody.querySelectorAll('.deep-call-row').forEach((row) => {
+      const idx = parseInt(row.dataset.idx, 10);
+      row.onclick = () => selectDeepCall(idx, false);
+      row.onmouseenter = () => selectDeepCall(idx, false);
+    });
+  }
+
+  renderDeepInteractiveChart();
+
+  if (deepCallsList.length > 0) {
+    selectDeepCall(deepCallsList[0].idx, false);
+  }
+}
+
+function renderDeepInteractiveChart() {
+  const svg = $('deepChartSvg');
+  if (!svg || !deepCallsList.length) {
+    if (svg) svg.innerHTML = '<text x="50%" y="50%" fill="var(--text-dim)" text-anchor="middle">No activity points available.</text>';
+    return;
+  }
+
+  const w = svg.clientWidth || 600;
+  const h = svg.clientHeight || 280;
+  const padLeft = 60;
+  const padRight = 24;
+  const padTop = 24;
+  const padBottom = 36;
+  const plotW = Math.max(10, w - padLeft - padRight);
+  const plotH = Math.max(10, h - padTop - padBottom);
+
+  const isCost = deepMetricMode === 'cost';
+  const values = deepCallsList.map((c) => (isCost ? (c.cost ?? 0) : (c.tokens ?? 0)));
+  const maxVal = Math.max(...values, isCost ? 0.005 : 100);
+
+  deepCoords = deepCallsList.map((c, i) => {
+    const val = isCost ? (c.cost ?? 0) : (c.tokens ?? 0);
+    const x = padLeft + (deepCallsList.length > 1 ? (i / (deepCallsList.length - 1)) * plotW : plotW / 2);
+    const y = padTop + (1 - val / maxVal) * plotH;
+    return { ...c, val, x, y };
+  });
+
+  // Smooth Bézier Path
+  let pathD = `M ${deepCoords[0].x} ${deepCoords[0].y}`;
+  for (let i = 1; i < deepCoords.length; i++) {
+    const p0 = deepCoords[i - 1];
+    const p1 = deepCoords[i];
+    const mx = (p0.x + p1.x) / 2;
+    pathD += ` C ${mx} ${p0.y}, ${mx} ${p1.y}, ${p1.x} ${p1.y}`;
+  }
+
+  const areaD = `${pathD} L ${deepCoords[deepCoords.length - 1].x} ${padTop + plotH} L ${deepCoords[0].x} ${padTop + plotH} Z`;
+
+  // Grid Lines & Ticks (4 horizontal divisions)
+  const gridLines = [];
+  const yTicks = 4;
+  for (let i = 0; i <= yTicks; i++) {
+    const tickVal = (maxVal / yTicks) * i;
+    const yPos = padTop + (1 - i / yTicks) * plotH;
+    const label = isCost ? money(tickVal) : formatTokensCompact(tickVal);
+    gridLines.push(`
+      <line x1="${padLeft}" y1="${yPos}" x2="${w - padRight}" y2="${yPos}" stroke="var(--border-card)" stroke-dasharray="2,2" stroke-width="1" />
+      <text x="${padLeft - 10}" y="${yPos + 4}" font-size="11" fill="var(--text-dim)" text-anchor="end">${label}</text>
+    `);
+  }
+
+  const dotsSvg = deepCoords.length <= 40
+    ? deepCoords.map((c) => `<circle cx="${c.x}" cy="${c.y}" r="3" fill="var(--accent-purple)" stroke="var(--bg-card)" stroke-width="1.5" />`).join('')
+    : '';
+
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="deepChartGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--accent-purple)" stop-opacity="0.35" />
+        <stop offset="100%" stop-color="var(--accent-purple)" stop-opacity="0.0" />
+      </linearGradient>
+    </defs>
+    ${gridLines.join('')}
+    <line x1="${padLeft}" y1="${padTop + plotH}" x2="${w - padRight}" y2="${padTop + plotH}" stroke="var(--border-subtle)" stroke-width="1" />
+    <path d="${areaD}" fill="url(#deepChartGrad)" />
+    <path d="${pathD}" fill="none" stroke="var(--accent-purple)" stroke-width="2.5" stroke-linecap="round" />
+    ${dotsSvg}
+    <g id="deepScrubGroup" style="display:none">
+      <line id="deepScrubLine" y1="${padTop}" y2="${padTop + plotH}" stroke="var(--accent-cyan)" stroke-dasharray="3,3" stroke-width="1.5" />
+      <circle id="deepScrubDot" r="5.5" fill="var(--accent-cyan)" stroke="var(--bg-card)" stroke-width="2" />
+    </g>
   `;
 
-  $('sessionEventsDrawer').style.display = 'flex';
+  // Attach scrub interaction to container
+  const wrap = $('deepChartWrap');
+  if (wrap) {
+    wrap.onmousemove = (evt) => {
+      const rect = svg.getBoundingClientRect();
+      const mouseX = evt.clientX - rect.left;
+      if (mouseX < padLeft || mouseX > w - padRight) return;
+
+      const relX = (mouseX - padLeft) / plotW;
+      const targetIdx = Math.min(deepCoords.length - 1, Math.max(0, Math.round(relX * (deepCoords.length - 1))));
+      const targetCall = deepCoords[targetIdx];
+      if (targetCall) {
+        selectDeepCall(targetCall.idx, true);
+      }
+    };
+
+    wrap.onclick = (evt) => {
+      const rect = svg.getBoundingClientRect();
+      const mouseX = evt.clientX - rect.left;
+      if (mouseX < padLeft || mouseX > w - padRight) return;
+
+      const relX = (mouseX - padLeft) / plotW;
+      const targetIdx = Math.min(deepCoords.length - 1, Math.max(0, Math.round(relX * (deepCoords.length - 1))));
+      const targetCall = deepCoords[targetIdx];
+      if (targetCall) {
+        selectDeepCall(targetCall.idx, true);
+      }
+    };
+  }
+}
+
+function selectDeepCall(idx, scrollTable) {
+  deepActiveCallIdx = idx;
+
+  // Highlight table row
+  const tbody = $('deepCallsTbody');
+  if (tbody) {
+    const prev = tbody.querySelector('.deep-call-row.active-row');
+    if (prev) prev.classList.remove('active-row');
+
+    const activeRow = tbody.querySelector(`.deep-call-row[data-idx="${idx}"]`);
+    if (activeRow) {
+      activeRow.classList.add('active-row');
+      if (scrollTable) {
+        activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+  }
+
+  // Update chart crosshair and tooltip
+  updateDeepChartScrubber(idx);
+}
+
+function updateDeepChartScrubber(idx) {
+  const pt = deepCoords.find((c) => c.idx === idx);
+  const scrubGroup = $('deepScrubGroup');
+  const scrubLine = $('deepScrubLine');
+  const scrubDot = $('deepScrubDot');
+  const tooltip = $('deepChartTooltip');
+  const svg = $('deepChartSvg');
+
+  if (!pt || !scrubGroup || !scrubLine || !scrubDot || !tooltip || !svg) return;
+
+  scrubGroup.style.display = 'block';
+  scrubLine.setAttribute('x1', pt.x);
+  scrubLine.setAttribute('x2', pt.x);
+  scrubDot.setAttribute('cx', pt.x);
+  scrubDot.setAttribute('cy', pt.y);
+
+  const w = svg.clientWidth || 600;
+  tooltip.innerHTML = `
+    <div style="font-weight:700; margin-bottom:2px">Call #${pt.idx} · ${pt.time}</div>
+    <div style="color:var(--accent-orange); font-weight:700">${money(pt.cost)}</div>
+    <div style="color:var(--text-muted); font-size:11px">${formatTokensCompact(pt.tokens)} tokens</div>
+    <div style="margin-top:2px"><code>${pt.model}</code></div>
+  `;
+  tooltip.style.left = `${Math.min(w - 160, Math.max(10, pt.x - 70))}px`;
+  tooltip.style.top = `${Math.max(10, pt.y - 75)}px`;
+  tooltip.style.display = 'block';
+}
+
+// Backward-compatible stubs
+function openExpandChartModal(session) {
+  openDeepSessionModal(session);
+}
+
+function openSessionEventsDrawer(session) {
+  openDeepSessionModal(session);
+}
+
+function populateDrawerEvents(sessionId) {
+  if (deepActiveSession && deepActiveSession.session_id === sessionId) {
+    populateDeepModalData(deepActiveSession);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   5. PRICING MODAL & DRAWERS
+   7. PRICING MODAL & DRAWERS
    ══════════════════════════════════════════════════════════════════════════ */
 
 function openPricingModal() {
@@ -1106,7 +1768,7 @@ function openPricingModal() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   6. SERVER INTEGRATION & ACTIONS
+   8. SERVER INTEGRATION & ACTIONS
    ══════════════════════════════════════════════════════════════════════════ */
 
 async function refreshScan() {
@@ -1137,7 +1799,7 @@ async function pollStatus() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   7. EVENT LISTENERS ATTACHMENT
+   9. EVENT LISTENERS ATTACHMENT
    ══════════════════════════════════════════════════════════════════════════ */
 
 // Navigation
@@ -1202,6 +1864,22 @@ $('modelsSourceSelect').addEventListener('change', (e) => {
   renderCurrent();
 });
 
+// Sessions View Mode Toggle (Sessions vs Group by Project)
+if ($('viewBtnSessions') && $('viewBtnProjects')) {
+  $('viewBtnSessions').addEventListener('click', () => {
+    state.sessionsViewMode = 'sessions';
+    $('viewBtnSessions').classList.add('active');
+    $('viewBtnProjects').classList.remove('active');
+    renderCurrent();
+  });
+  $('viewBtnProjects').addEventListener('click', () => {
+    state.sessionsViewMode = 'projects';
+    $('viewBtnProjects').classList.add('active');
+    $('viewBtnSessions').classList.remove('active');
+    renderCurrent();
+  });
+}
+
 // Sessions Search, Source & Sort
 $('sessionsSearchInput').addEventListener('input', (e) => {
   state.sessionsSearch = e.target.value;
@@ -1219,9 +1897,40 @@ $('sessionsSortSelect').addEventListener('change', (e) => {
 });
 
 // Modals & Drawers
-$('openPricingBtn').onclick = openPricingModal;
-$('closePricingBtn').onclick = () => ($('pricingModal').style.display = 'none');
-$('closeDrawerBtn').onclick = () => ($('sessionEventsDrawer').style.display = 'none');
+if ($('openPricingBtn')) $('openPricingBtn').onclick = openPricingModal;
+if ($('closePricingBtn')) $('closePricingBtn').onclick = () => {
+  if ($('pricingModal')) $('pricingModal').style.display = 'none';
+};
+if ($('closeDeepModalBtn')) {
+  $('closeDeepModalBtn').onclick = () => {
+    if ($('sessionDeepModal')) $('sessionDeepModal').style.display = 'none';
+    deepActiveSession = null;
+  };
+}
+if ($('closeDrawerBtn') && $('sessionEventsDrawer')) {
+  $('closeDrawerBtn').onclick = () => ($('sessionEventsDrawer').style.display = 'none');
+}
+if ($('closeSessionChartBtn') && $('sessionChartModal')) {
+  $('closeSessionChartBtn').onclick = () => ($('sessionChartModal').style.display = 'none');
+}
+
+// Deep Modal Metric Toggle (Cost vs Tokens)
+if ($('deepMetricBtnCost') && $('deepMetricBtnTokens')) {
+  $('deepMetricBtnCost').addEventListener('click', () => {
+    deepMetricMode = 'cost';
+    $('deepMetricBtnCost').classList.add('active');
+    $('deepMetricBtnTokens').classList.remove('active');
+    renderDeepInteractiveChart();
+    if (deepActiveCallIdx) updateDeepChartScrubber(deepActiveCallIdx);
+  });
+  $('deepMetricBtnTokens').addEventListener('click', () => {
+    deepMetricMode = 'tokens';
+    $('deepMetricBtnTokens').classList.add('active');
+    $('deepMetricBtnCost').classList.remove('active');
+    renderDeepInteractiveChart();
+    if (deepActiveCallIdx) updateDeepChartScrubber(deepActiveCallIdx);
+  });
+}
 
 // Modal Tab Switcher
 document.querySelectorAll('.modal-tab-btn').forEach((btn) => {
@@ -1237,8 +1946,26 @@ document.querySelectorAll('.modal-tab-btn').forEach((btn) => {
 
 // Close modals on outside click
 window.addEventListener('click', (e) => {
-  if (e.target === $('pricingModal')) $('pricingModal').style.display = 'none';
-  if (e.target === $('sessionEventsDrawer')) $('sessionEventsDrawer').style.display = 'none';
+  if ($('pricingModal') && e.target === $('pricingModal')) $('pricingModal').style.display = 'none';
+  if ($('sessionDeepModal') && e.target === $('sessionDeepModal')) {
+    $('sessionDeepModal').style.display = 'none';
+    deepActiveSession = null;
+  }
+  if ($('sessionEventsDrawer') && e.target === $('sessionEventsDrawer')) $('sessionEventsDrawer').style.display = 'none';
+  if ($('sessionChartModal') && e.target === $('sessionChartModal')) $('sessionChartModal').style.display = 'none';
+});
+
+// Close modals on Escape key
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if ($('pricingModal')) $('pricingModal').style.display = 'none';
+    if ($('sessionDeepModal')) {
+      $('sessionDeepModal').style.display = 'none';
+      deepActiveSession = null;
+    }
+    if ($('sessionEventsDrawer')) $('sessionEventsDrawer').style.display = 'none';
+    if ($('sessionChartModal')) $('sessionChartModal').style.display = 'none';
+  }
 });
 
 // Window resize chart redraw
@@ -1246,7 +1973,12 @@ window.addEventListener('resize', () => {
   if (state.currentTab === 'overview' || state.currentTab === 'trends') {
     renderCurrent();
   }
+  if (deepActiveSession && $('sessionDeepModal') && $('sessionDeepModal').style.display === 'flex') {
+    renderDeepInteractiveChart();
+    if (deepActiveCallIdx) updateDeepChartScrubber(deepActiveCallIdx);
+  }
 });
 
 // Boot
 loadData();
+

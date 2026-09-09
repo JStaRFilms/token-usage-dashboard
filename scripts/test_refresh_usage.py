@@ -120,6 +120,38 @@ class RefreshUsageTests(unittest.TestCase):
         self.assertAlmostEqual(by_month["2026-08"]["estimated_cost_usd"], 0.20)
         self.assertAlmostEqual(by_month["2026-09"]["estimated_cost_usd"], 10.00)
 
+    def test_extract_project_info(self):
+        name, directory = refresh_usage.extract_project_info(
+            r"C:\Users\johno\.pi\agent\sessions\--C--CreativeOS-01_Projects-Code-Personal_Stuff-2026-03-14_School_Management_System--\01a06f61.jsonl",
+            r"C:\CreativeOS\01_Projects\Code\Personal_Stuff\2026-03-14_School_Management_System"
+        )
+        self.assertEqual(name, "2026-03-14_School_Management_System")
+        self.assertIn("School_Management_System", directory)
+
+        name2, _ = refresh_usage.extract_project_info(
+            r"C:\CreativeOS\01_Projects\Code\Personal_Stuff\2025-12-02_VibeCode-Protocol-Suite\.pi\agent\sessions\test.jsonl"
+        )
+        self.assertEqual(name2, "2025-12-02_VibeCode-Protocol-Suite")
+
+        name3, _ = refresh_usage.extract_project_info(
+            r"C:\Users\johno\.gemini\antigravity\conversations\conv.db"
+        )
+        self.assertEqual(name3, "Antigravity Workspace")
+
+    def test_aggregate_by_project_and_session_meta(self):
+        e1 = refresh_usage.event(
+            "pi", r"C:\CreativeOS\Projects\Alpha\.pi\agent\sessions\s1.jsonl",
+            "2026-09-01T12:00:00Z", "s1", "gpt-6-astra",
+            1_000_000, 0, 0, 0, 1_000_000, False, "model-call"
+        )
+        e1["cwd"] = r"C:\CreativeOS\Projects\Alpha"
+        summary = refresh_usage.aggregate([e1], [], 0.0)
+        self.assertEqual(summary["by_project"][0]["project"], "Alpha")
+        self.assertEqual(summary["by_session"][0]["project"], "Alpha")
+        self.assertEqual(summary["by_session"][0]["primary_model"], "gpt-6-astra")
+        self.assertIn("sources", summary["by_day"][0])
+        self.assertIn("activity", summary["by_session"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

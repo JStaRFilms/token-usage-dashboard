@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Usage — Token Ledger</title>
   <meta name="description" content="Modern usage monitor for Takomi/Pi, Codex, and Antigravity model usage." />
-  <link rel="stylesheet" href="assets/app.css" />
+  <link rel="stylesheet" href="assets/app.css?v=4.5.1" />
 </head>
 <body data-view="modern">
   <!-- Top Navigation Header -->
@@ -277,7 +277,11 @@
         <div class="sessions-filter-toolbar">
           <div class="search-input-wrap flex-fill">
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="sessionsSearchInput" placeholder="Search session, model or file" />
+            <input type="text" id="sessionsSearchInput" placeholder="Search session, project, model or file" />
+          </div>
+          <div class="toggle-pill-group" id="sessionsViewToggle">
+            <button class="toggle-pill active" data-view="sessions" id="viewBtnSessions">Sessions</button>
+            <button class="toggle-pill" data-view="projects" id="viewBtnProjects">Group by Project</button>
           </div>
           <div class="select-wrapper">
             <select id="sessionsSourceSelect">
@@ -292,6 +296,9 @@
             </select>
           </div>
         </div>
+
+        <!-- Project Active Filter Banner -->
+        <div id="sessionsProjectFilterBanner" class="sessions-project-filter-banner" style="display:none"></div>
 
         <!-- Two-column split layout -->
         <div class="sessions-split-layout">
@@ -353,22 +360,77 @@
     </div>
   </div>
 
-  <!-- Session Events Slide-Over Drawer -->
-  <div id="sessionEventsDrawer" class="drawer-backdrop" style="display:none">
-    <div class="drawer-panel">
-      <div class="drawer-header">
-        <div>
-          <h2 class="drawer-title" id="drawerSessionTitle">Session events</h2>
-          <p class="drawer-sub" id="drawerSessionSub">Event-level API call breakdown</p>
+  <!-- Unified In-Depth Session Inspector Modal -->
+  <div id="sessionDeepModal" class="modal-backdrop" style="display:none">
+    <div class="modal-card session-deep-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <div class="modal-header-top-row">
+            <span class="sess-source-pill" id="deepSessionSource">Source</span>
+            <span class="deep-project-badge" id="deepProjectBadge">Project</span>
+            <div class="deep-session-id-wrap">
+              <code id="deepSessionId">session-id</code>
+              <button class="copy-mini-btn" id="deepCopyIdBtn" title="Copy session ID">Copy</button>
+            </div>
+          </div>
+          <p class="modal-subtitle" id="deepSessionSub">—</p>
         </div>
-        <button id="closeDrawerBtn" class="close-btn" aria-label="Close drawer">&times;</button>
+        <button id="closeDeepModalBtn" class="close-btn" aria-label="Close modal">&times;</button>
       </div>
-      <div class="drawer-body" id="drawerEventsList">
-        <!-- Rendered events table -->
+
+      <div class="session-deep-body">
+        <!-- Left Pane: Interactive Usage Timeline Graph & Metrics -->
+        <div class="session-deep-left">
+          <div class="modal-metrics-row" id="deepSessionMetrics"></div>
+
+          <div class="deep-chart-header">
+            <div class="deep-chart-title-wrap">
+              <div class="session-activity-header" id="deepChartTitle">API usage curve over session timeline</div>
+              <div class="deep-chart-subtitle">Scrub graph to correlate with ledger</div>
+            </div>
+            <div class="toggle-pill-group" id="deepMetricToggle">
+              <button class="toggle-pill active" data-metric="cost" id="deepMetricBtnCost">Cost</button>
+              <button class="toggle-pill" data-metric="tokens" id="deepMetricBtnTokens">Tokens</button>
+            </div>
+          </div>
+
+          <div class="chart-box tall deep-chart-container" id="deepChartWrap">
+            <svg id="deepChartSvg" class="svg-chart" preserveAspectRatio="none"></svg>
+            <div id="deepChartTooltip" class="chart-tooltip"></div>
+          </div>
+
+          <div class="deep-callout-footer">
+            <span>Hover or drag across graph to scrub ledger, or click ledger rows to track on graph</span>
+          </div>
+        </div>
+
+        <!-- Right Pane: Synchronized API Call Ledger Table -->
+        <div class="session-deep-right">
+          <div class="deep-ledger-header">
+            <span class="session-activity-header">Call Ledger</span>
+            <span class="deep-call-count-badge" id="deepCallCountBadge">0 calls</span>
+          </div>
+          <div class="deep-calls-table-wrap" id="deepCallsTableWrap">
+            <table class="modal-table-wrap deep-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Time</th>
+                  <th>Model</th>
+                  <th>Tokens</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody id="deepCallsTbody">
+                <!-- Dynamically populated rows -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-  <script src="assets/app.js?v=4.0.0"></script>
+  <script src="assets/app.js?v=4.5.1"></script>
 </body>
 </html>

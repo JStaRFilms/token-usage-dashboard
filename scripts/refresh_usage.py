@@ -786,6 +786,38 @@ def discover_project_pi_roots(project_roots: list[str]) -> tuple[list[Path], lis
     return found, warnings
 
 
+import functools
+
+@functools.lru_cache(maxsize=8192)
+def extract_project_info(file_path: str, cwd: str = "") -> tuple[str, str]:
+    """Extract human-readable project name and directory from session file and cwd."""
+    if cwd:
+        p = Path(cwd)
+        name = p.name or str(p)
+        return name, str(p)
+    f_str = str(file_path or "").replace("\\", "/")
+    if "/.pi/" in f_str:
+        before_pi = f_str.split("/.pi/")[0]
+        proj_p = Path(before_pi)
+        return proj_p.name or before_pi, str(proj_p)
+    m = re.search(r"--[A-Za-z]--(.*?)--", f_str)
+    if m:
+        raw = m.group(1)
+        match_folder = re.search(r"(\d{4}-\d{2}-\d{2}[^/\\]*)$", raw)
+        if match_folder:
+            return match_folder.group(1), raw
+        parts = [part for part in raw.split("-") if part]
+        return (parts[-1] if parts else raw), raw
+    if "antigravity" in f_str.lower():
+        return "Antigravity Workspace", str(Path(file_path).parent) if file_path else ""
+    if "codex" in f_str.lower():
+        return "Codex Session", str(Path(file_path).parent) if file_path else ""
+    if "gemini" in f_str.lower():
+        return "Gemini Session", str(Path(file_path).parent) if file_path else ""
+    p = Path(file_path) if file_path else None
+    return (p.stem if p else "General"), (str(p.parent) if p else "")
+
+
 def aggregate(events: list[dict], warnings: list[str], started: float, discounts: list[dict] | None = None) -> dict:
     totals = Counter()
     by_model = defaultdict(Counter)
@@ -796,40 +828,172 @@ def aggregate(events: list[dict], warnings: list[str], started: float, discounts
     by_session = defaultdict(Counter)
     unknown_models = Counter()
 
+    day_sources: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    day_source_tokens: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    month_sources: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    month_source_tokens: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    model_sources: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    session_models: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    session_meta: dict[str, dict] = {}
+    session_activity: dict[str, list[dict]] = defaultdict(list)
+    by_project_counter: dict[str, Counter] = defaultdict(Counter)
+    project_sessions: dict[str, set[str]] = defaultdict(set)
+
     for e in events:
         keys = ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
         day = e.get("day") or "unknown"
         month = e.get("month") or (day[:7] if len(day) >= 7 else "unknown")
+        sid = e["session_id"]
+        src_group = e.get("source_group", e["source"])
+        cost = e.get("estimated_cost_usd") or 0.0
+        tokens = e.get("total_tokens") or 0
+        proj_name, directory = extract_project_info(e.get("file", ""), e.get("cwd", ""))
+
         for k in keys:
             totals[k] += e[k]
             by_model[e["model"]][k] += e[k]
-            by_source[e.get("source_group", e["source"])][k] += e[k]
+            by_source[src_group][k] += e[k]
             by_source_detail[e["source"]][k] += e[k]
             by_day[day][k] += e[k]
             by_month[month][k] += e[k]
-            by_session[e["session_id"]][k] += e[k]
+            by_session[sid][k] += e[k]
+
+        day_sources[day][src_group] += cost
+        day_source_tokens[day][src_group] += tokens
+        month_sources[month][src_group] += cost
+        month_source_tokens[month][src_group] += tokens
+        model_sources[e["model"]][src_group] += cost
+        session_models[sid][e["model"]] += cost
+
+        by_project_counter[proj_name]["total_tokens"] += tokens
+        by_project_counter[proj_name]["cached_input_tokens"] += e.get("cached_input_tokens", 0)
+        by_project_counter[proj_name]["output_tokens"] += e.get("output_tokens", 0)
+        by_project_counter[proj_name]["events"] += 1
+        project_sessions[proj_name].add(sid)
+        if directory and not by_project_counter[proj_name].get("directory"):
+            by_project_counter[proj_name]["directory"] = directory
+        if day and (not by_project_counter[proj_name].get("last_day") or day > by_project_counter[proj_name]["last_day"]):
+            by_project_counter[proj_name]["last_day"] = day
+
         if e["estimated_cost_usd"] is not None:
             totals["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_model[e["model"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
-            by_source[e.get("source_group", e["source"])]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_source[src_group]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_source_detail[e["source"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_day[day]["estimated_cost_usd"] += e["estimated_cost_usd"]
             by_month[month]["estimated_cost_usd"] += e["estimated_cost_usd"]
-            by_session[e["session_id"]]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_session[sid]["estimated_cost_usd"] += e["estimated_cost_usd"]
+            by_project_counter[proj_name]["estimated_cost_usd"] += e["estimated_cost_usd"]
             if e.get("discount_amount_usd"):
                 totals["discount_amount_usd"] += e["discount_amount_usd"]
                 by_month[month]["discount_amount_usd"] += e["discount_amount_usd"]
         else:
             unknown_models[e["model"]] += 1
+
         by_model[e["model"]]["events"] += 1
-        by_source[e.get("source_group", e["source"])]["events"] += 1
+        by_source[src_group]["events"] += 1
         by_source_detail[e["source"]]["events"] += 1
         by_day[day]["events"] += 1
         by_month[month]["events"] += 1
-        by_session[e["session_id"]]["events"] += 1
+        by_session[sid]["events"] += 1
+
+        if sid not in session_meta:
+            session_meta[sid] = {
+                "project": proj_name,
+                "directory": directory,
+                "file": str(e.get("file") or ""),
+                "source": src_group,
+                "source_detail": e.get("source"),
+                "first_day": day,
+                "last_day": day,
+                "first_ts": e.get("timestamp"),
+                "last_ts": e.get("timestamp"),
+            }
+        else:
+            sm = session_meta[sid]
+            if day and (not sm["first_day"] or day < sm["first_day"]):
+                sm["first_day"] = day
+            if day and (not sm["last_day"] or day > sm["last_day"]):
+                sm["last_day"] = day
+            if e.get("timestamp") and (not sm["first_ts"] or e.get("timestamp") < sm["first_ts"]):
+                sm["first_ts"] = e.get("timestamp")
+            if e.get("timestamp") and (not sm["last_ts"] or e.get("timestamp") > sm["last_ts"]):
+                sm["last_ts"] = e.get("timestamp")
+            if not sm.get("directory") and directory:
+                sm["directory"] = directory
+            if sm.get("project") in ("General", "Codex Session", "Antigravity Workspace") and proj_name not in ("General", "Codex Session", "Antigravity Workspace"):
+                sm["project"] = proj_name
+
+        if len(session_activity[sid]) < 30:
+            session_activity[sid].append({
+                "ts": e.get("timestamp"),
+                "cost": round(cost, 5),
+                "tokens": tokens,
+                "model": e.get("model") or "unknown",
+            })
 
     def rows(d):
         return [{"key": k, **dict(v)} for k, v in sorted(d.items(), key=lambda kv: -kv[1].get("estimated_cost_usd", 0))]
+
+    session_rows = []
+    for sid, counts in sorted(by_session.items(), key=lambda kv: -kv[1].get("estimated_cost_usd", 0)):
+        sm = session_meta.get(sid, {})
+        m_dict = dict(session_models.get(sid, {}))
+        top_model = max(m_dict.items(), key=lambda kv: kv[1])[0] if m_dict else "unknown"
+        session_rows.append({
+            "key": sid,
+            "session_id": sid,
+            "project": sm.get("project", "General"),
+            "directory": sm.get("directory", ""),
+            "file": sm.get("file", ""),
+            "source": sm.get("source", "unknown"),
+            "source_detail": sm.get("source_detail", "unknown"),
+            "first_day": sm.get("first_day", ""),
+            "last_day": sm.get("last_day", ""),
+            "first_ts": sm.get("first_ts", ""),
+            "last_ts": sm.get("last_ts", ""),
+            "primary_model": top_model,
+            "models": m_dict,
+            "activity": session_activity.get(sid, []),
+            **dict(counts),
+        })
+
+    day_rows = []
+    for d, counts in sorted(by_day.items(), key=lambda kv: kv[0]):
+        day_rows.append({
+            "key": d,
+            **dict(counts),
+            "sources": dict(day_sources[d]),
+            "source_tokens": dict(day_source_tokens[d]),
+        })
+
+    month_rows = []
+    for m, counts in sorted(by_month.items(), key=lambda kv: kv[0]):
+        month_rows.append({
+            "key": m,
+            **dict(counts),
+            "sources": dict(month_sources[m]),
+            "source_tokens": dict(month_source_tokens[m]),
+        })
+
+    model_rows = []
+    for m, counts in sorted(by_model.items(), key=lambda kv: -kv[1].get("estimated_cost_usd", 0)):
+        model_rows.append({
+            "key": m,
+            **dict(counts),
+            "sources": dict(model_sources[m]),
+        })
+
+    project_rows = []
+    for p, counts in sorted(by_project_counter.items(), key=lambda kv: -kv[1].get("estimated_cost_usd", 0)):
+        project_rows.append({
+            "key": p,
+            "project": p,
+            "directory": counts.get("directory", ""),
+            "last_day": counts.get("last_day", ""),
+            "sessions_count": len(project_sessions[p]),
+            **{k: v for k, v in counts.items() if k not in ("directory", "last_day")},
+        })
 
     high = sorted(events, key=lambda e: e.get("estimated_cost_usd") or 0, reverse=True)[:100]
     recent = sorted(events, key=lambda e: e.get("timestamp") or "", reverse=True)[:200]
@@ -840,13 +1004,14 @@ def aggregate(events: list[dict], warnings: list[str], started: float, discounts
         "session_count": len(set(e["session_id"] for e in events)),
         "file_count": len(set(e["file"] for e in events)),
         "totals": dict(totals),
-        "by_model": rows(by_model),
+        "by_model": model_rows,
         "by_source": rows(by_source),
         "by_source_detail": rows(by_source_detail),
-        "by_day": sorted(rows(by_day), key=lambda r: r["key"]),
-        "by_month": sorted(rows(by_month), key=lambda r: r["key"]),
+        "by_day": day_rows,
+        "by_month": month_rows,
+        "by_project": project_rows,
         "discounts": discounts or [],
-        "by_session": rows(by_session)[:250],
+        "by_session": session_rows,
         "high_cost_events": high,
         "recent_events": recent,
         "unknown_price_models": dict(unknown_models),
