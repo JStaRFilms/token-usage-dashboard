@@ -67,6 +67,66 @@ class RefreshUsageTests(unittest.TestCase):
         # 500k uncached ($5) + 500k cached ($0.5) + 100k output ($5) = $10.50
         self.assertAlmostEqual(cost, 10.50)
 
+    def test_gpt_6_sol_and_luna_standard_and_long_context_rates(self):
+        for model, short_rates, long_rates in (
+            ("gpt-6-sol", (2.0, 0.2, 2.5, 10.0), (4.0, 0.4, 5.0, 15.0)),
+            ("gpt-6-luna", (0.1, 0.01, 0.125, 0.5), (0.2, 0.02, 0.25, 0.75)),
+        ):
+            with self.subTest(model=model):
+                short, short_price = refresh_usage.calc_cost(
+                    f"openai-codex/{model}[high]", 99_000, 172_000, 50_000,
+                    False, "2026-09-23T00:00:00Z", prompt_tokens=272_000, cache_write_tokens=1_000,
+                )
+                long, long_price = refresh_usage.calc_cost(
+                    model, 99_001, 172_000, 50_000,
+                    False, "2026-09-23T00:00:00Z", prompt_tokens=272_001, cache_write_tokens=1_000,
+                )
+                self.assertEqual(short_price["priced_as"], model)
+                self.assertEqual(
+                    tuple(short_price[k] for k in ("input_rate", "cached_rate", "cache_write_rate", "output_rate")),
+                    short_rates,
+                )
+                self.assertEqual(
+                    tuple(long_price[k] for k in ("input_rate", "cached_rate", "cache_write_rate", "output_rate")),
+                    long_rates,
+                )
+                self.assertAlmostEqual(short, (
+                    99_000 * short_rates[0] + 172_000 * short_rates[1]
+                    + 1_000 * short_rates[2] + 50_000 * short_rates[3]
+                ) / 1_000_000)
+                self.assertAlmostEqual(long, (
+                    99_001 * long_rates[0] + 172_000 * long_rates[1]
+                    + 1_000 * long_rates[2] + 50_000 * long_rates[3]
+                ) / 1_000_000)
+
+    def test_pi_gpt_6_model_call_prices_cache_writes_and_long_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "session.jsonl"
+            history.write_text("\n".join([
+                json.dumps({"type": "model_change", "modelId": "gpt-6-sol"}),
+                json.dumps({"type": "message", "timestamp": "2026-09-23T00:00:00Z", "message": {
+                    "model": "gpt-6-sol", "usage": {
+                        "input": 100_000, "cacheRead": 172_000, "cacheWrite": 1,
+                        "output": 10_000, "totalTokens": 282_001,
+                    },
+                }}),
+            ]), encoding="utf-8")
+            events, warnings, _ = refresh_usage.scan_pi(Path(directory))
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["price"]["input_rate"], 4.0)
+        self.assertEqual(events[0]["price"]["cache_write_rate"], 5.0)
+        self.assertAlmostEqual(
+            events[0]["estimated_cost_usd"],
+            (100_000 * 4 + 172_000 * 0.4 + 5 + 10_000 * 15) / 1_000_000,
+        )
+        delta = refresh_usage.event(
+            "codex", "session.jsonl", "2026-09-23T00:00:00Z", "session", "gpt-6-sol",
+            300_000, 0, 10_000, 0, 310_000, True, "usage-delta",
+        )
+        self.assertEqual(delta["price"]["input_rate"], 2.0)
+
     def test_gemini_3_8_flash_schedule_and_aliases(self):
         promo_cost, promo_price = refresh_usage.calc_cost(
             "antigravity/gemini-3.8-flash[low]", 1_000_000, 0, 1_000_000, True, "2026-10-01T00:00:00Z"

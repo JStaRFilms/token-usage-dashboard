@@ -28,6 +28,8 @@ DEFAULT_CONFIG = ROOT / "config.json"
 # Reasoning output is included in output_tokens by Codex totals; kept separately for reporting only.
 PRICES = {
     "gpt-6-astra": (10.00, 1.00, 50.00),
+    "gpt-6-sol": (2.00, 0.20, 10.00),
+    "gpt-6-luna": (0.10, 0.01, 0.50),
     "gpt-5.6-luna": (0.20, 0.02, 1.20),
     "gpt-5.6-sol": (5.00, 0.50, 30.00),
     "gpt-5.6-terra": (2.00, 0.20, 12.00),
@@ -68,6 +70,8 @@ PRICES = {
 
 PRICE_NOTES = {
     "gpt-6-astra": "OpenAI standard short-context pricing ($10.00 / $1.00 / $50.00).",
+    "gpt-6-sol": "OpenAI Standard short-context rate; >272K prompt tokens: 2x input/cache, 1.5x output. Cache writes: $2.50/1M (short).",
+    "gpt-6-luna": "OpenAI Standard short-context rate; >272K prompt tokens: 2x input/cache, 1.5x output. Cache writes: $0.125/1M (short).",
     "gpt-5.6-luna": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $1.00 / $0.10 / $6.00 rate.",
     "gpt-5.6-sol": "OpenAI standard short-context pricing; unchanged on July 30, 2026.",
     "gpt-5.6-terra": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $2.50 / $0.25 / $15.00 rate.",
@@ -242,6 +246,8 @@ def calc_cost(
     input_includes_cache: bool,
     timestamp: str | None,
     discounts: list[dict] | None = None,
+    prompt_tokens: int | None = None,
+    cache_write_tokens: int = 0,
 ) -> tuple[float | None, dict]:
     priced_as = canonical_model(model)
     price, note = price_for_model(model, timestamp)
@@ -251,11 +257,21 @@ def calc_cost(
     if not price:
         return None, {"known": False, "note": "Unknown price", "priced_as": priced_as}
     in_rate, cache_rate, out_rate = price
+    cache_write_rate = None
+    if priced_as in ("gpt-6-sol", "gpt-6-luna"):
+        cache_write_rate = in_rate * 1.25
+        if prompt_tokens is not None and prompt_tokens > 272_000:
+            in_rate *= 2
+            cache_rate *= 2
+            cache_write_rate *= 2
+            out_rate *= 1.5
+            note = f"{note} Long-context rate applies to the full request."
     non_cached = max(input_tokens - cached_tokens, 0) if input_includes_cache else input_tokens
     cost_input = non_cached * in_rate / 1_000_000
     cost_cache = cached_tokens * cache_rate / 1_000_000
+    cost_cache_write = cache_write_tokens * cache_write_rate / 1_000_000 if cache_write_rate is not None else 0.0
     cost_output = output_tokens * out_rate / 1_000_000
-    base_cost = cost_input + cost_cache + cost_output
+    base_cost = cost_input + cost_cache + cost_cache_write + cost_output
 
     discount = find_discount(discounts, priced_as, timestamp)
     discount_percent = 0.0
@@ -276,10 +292,12 @@ def calc_cost(
         "known": True,
         "input_rate": in_rate,
         "cached_rate": cache_rate,
+        "cache_write_rate": cache_write_rate,
         "output_rate": out_rate,
         "non_cached_input_tokens": non_cached,
         "cost_input": cost_input,
         "cost_cache": cost_cache,
+        "cost_cache_write": cost_cache_write,
         "cost_output": cost_output,
         "base_cost": base_cost,
         "discount_percent": discount_percent,
@@ -305,8 +323,13 @@ def event(
     input_includes_cache,
     granularity,
     discounts: list[dict] | None = None,
+    cache_write_tokens: int = 0,
 ):
-    cost, price = calc_cost(model or "unknown", input_tokens, cached_tokens, output_tokens, input_includes_cache, timestamp, discounts)
+    prompt_tokens = input_tokens + cached_tokens + cache_write_tokens if granularity == "model-call" and not input_includes_cache else None
+    cost, price = calc_cost(
+        model or "unknown", input_tokens, cached_tokens, output_tokens,
+        input_includes_cache, timestamp, discounts, prompt_tokens, cache_write_tokens,
+    )
     day = iso_day(timestamp)
     month = day[:7] if len(day) >= 7 else "unknown"
     return {
@@ -420,6 +443,7 @@ def scan_pi(root: Path, source_name: str = "pi", discounts: list[dict] | None = 
                             False,
                             "model-call",
                             discounts=discounts,
+                            cache_write_tokens=int(u.get("cacheWrite", 0) or 0),
                         ) | {"provider": provider, "cwd": cwd})
         except Exception as e:
             warnings.append(f"Pi parse failed: {file}: {e}")
@@ -1026,6 +1050,7 @@ def aggregate(events: list[dict], warnings: list[str], started: float, discounts
             "Project-local Pi/Takomi histories are discovered by following cwd links from global Pi sessions by default; broad project root scans are opt-in.",
             "Gemini pricing uses current Google Gemini API paid text/image/video rates; Pro models use the <=200K-context tier and internal aliases are mapped to their public equivalents where available.",
             "GPT-5.6 Luna and Terra preserve the pre-July 30, 2026 OpenAI rates for earlier usage; Sol pricing is unchanged.",
+            "GPT-6 Sol and Luna use OpenAI Standard rates. Pi model-call records above 272K prompt tokens use long-context rates for the entire call; Codex usage deltas do not expose reliable per-request prompt sizes, so they use short-context estimates. Pi cache writes are priced for these models when logged. Other service tiers, regional premiums, and tool fees are not inferred from usage logs.",
             "Pricing schedules support date-effective transitions (e.g. GPT-5.6 Luna and Terra cuts on July 30, 2026; Gemini 3.8 Flash promotional rates through 2026-12-31; GPT-6 Astra launch).",
             "Configurable promotional and period discounts can be defined in config.json under 'discounts' with optional model, date/month filters.",
             "Monthly usage rollups are available via by_month in the generated summary.",
