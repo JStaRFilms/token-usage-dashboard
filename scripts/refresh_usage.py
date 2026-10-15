@@ -28,6 +28,7 @@ DEFAULT_CONFIG = ROOT / "config.json"
 # Reasoning output is included in output_tokens by Codex totals; kept separately for reporting only.
 PRICES = {
     "gpt-6-astra": (10.00, 1.00, 50.00),
+    "gpt-6.1-sol": (2.00, 0.10, 10.00),
     "gpt-6-sol": (2.00, 0.20, 10.00),
     "gpt-6-luna": (0.10, 0.01, 0.50),
     "gpt-5.6-luna": (0.20, 0.02, 1.20),
@@ -50,6 +51,9 @@ PRICES = {
     "gpt-5-codex": (1.25, 0.125, 10.00),
     # Anthropic best-effort, used only when present in Pi logs.
     "claude-sonnet-4-6": (3.00, 0.30, 15.00),
+    "claude-opus-4-6": (5.00, 0.50, 25.00),
+    "claude-opus-5": (5.00, 0.50, 25.00),
+    "glm-5.3": (1.40, 0.26, 4.40),
     # Google Gemini Developer API paid tier, per 1M text/image/video tokens.
     "gemini-3.8-flash": (0.75, 0.075, 3.75),
     "gemini-3.7-flash": (0.75, 0.075, 3.75),
@@ -70,6 +74,10 @@ PRICES = {
 
 PRICE_NOTES = {
     "gpt-6-astra": "OpenAI standard short-context pricing ($10.00 / $1.00 / $50.00).",
+    "gpt-6.1-sol": "OpenAI Standard short-context rate; >272K prompt tokens: 2x input/cache, 1.5x output. Cache writes: $2.50/1M (short). Source: https://platform.openai.com/docs/pricing",
+    "claude-opus-4-6": "Anthropic standard API rate, including thinking output. Cache writes use the 5-minute rate ($6.25/1M); logs do not identify TTL. Source: https://platform.claude.com/docs/en/about-claude/pricing",
+    "claude-opus-5": "Anthropic standard API rate. Cache writes use the 5-minute rate ($6.25/1M); logs do not identify TTL. Source: https://platform.claude.com/docs/en/about-claude/pricing",
+    "glm-5.3": "Z.ai standard API rate; proxy usage is estimated at the public API rate, not a proxy invoice. Source: https://docs.z.ai/guides/overview/pricing",
     "gpt-6-sol": "OpenAI Standard short-context rate; >272K prompt tokens: 2x input/cache, 1.5x output. Cache writes: $2.50/1M (short).",
     "gpt-6-luna": "OpenAI Standard short-context rate; >272K prompt tokens: 2x input/cache, 1.5x output. Cache writes: $0.125/1M (short).",
     "gpt-5.6-luna": "OpenAI standard short-context pricing from July 30, 2026; earlier usage uses the prior $1.00 / $0.10 / $6.00 rate.",
@@ -146,6 +154,13 @@ RATE_SCHEDULES = {
     ],
 }
 MODEL_ALIASES = {
+    "ar-gpt-6-astra": "gpt-6-astra",
+    "ar-gpt-6.1-sol": "gpt-6.1-sol",
+    "ar-claude-opus-5": "claude-opus-5",
+    "ar-glm-5.3": "glm-5.3",
+    "z-ai/glm-5.3": "glm-5.3",
+    "claude-opus-4-6-thinking": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6",
     "ar-gpt-5.6-luna": "gpt-5.6-luna",
     "ar-gpt-5.6-sol": "gpt-5.6-sol",
     "ar-gpt-5.6-terra": "gpt-5.6-terra",
@@ -258,7 +273,9 @@ def calc_cost(
         return None, {"known": False, "note": "Unknown price", "priced_as": priced_as}
     in_rate, cache_rate, out_rate = price
     cache_write_rate = None
-    if priced_as in ("gpt-6-sol", "gpt-6-luna"):
+    if priced_as in ("claude-opus-4-6", "claude-opus-5"):
+        cache_write_rate = in_rate * 1.25
+    if priced_as in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
         cache_write_rate = in_rate * 1.25
         if prompt_tokens is not None and prompt_tokens > 272_000:
             in_rate *= 2
@@ -1050,7 +1067,8 @@ def aggregate(events: list[dict], warnings: list[str], started: float, discounts
             "Project-local Pi/Takomi histories are discovered by following cwd links from global Pi sessions by default; broad project root scans are opt-in.",
             "Gemini pricing uses current Google Gemini API paid text/image/video rates; Pro models use the <=200K-context tier and internal aliases are mapped to their public equivalents where available.",
             "GPT-5.6 Luna and Terra preserve the pre-July 30, 2026 OpenAI rates for earlier usage; Sol pricing is unchanged.",
-            "GPT-6 Sol and Luna use OpenAI Standard rates. Pi model-call records above 272K prompt tokens use long-context rates for the entire call; Codex usage deltas do not expose reliable per-request prompt sizes, so they use short-context estimates. Pi cache writes are priced for these models when logged. Other service tiers, regional premiums, and tool fees are not inferred from usage logs.",
+            "GPT-6.1 Sol, GPT-6 Sol and Luna use OpenAI Standard rates. Pi model-call records above 272K prompt tokens use long-context rates for the entire call; Codex usage deltas do not expose reliable per-request prompt sizes, so they use short-context estimates. Pi cache writes are priced for these models when logged. Other service tiers, regional premiums, and tool fees are not inferred from usage logs.",
+            "Claude Opus 4.6 and 5 use Anthropic standard API rates, with 5-minute cache writes because logs do not identify TTL. GLM-5.3 proxy calls use Z.ai public API rates as estimates. Unidentified internal aliases and local models without a public API rate remain unpriced.",
             "Pricing schedules support date-effective transitions (e.g. GPT-5.6 Luna and Terra cuts on July 30, 2026; Gemini 3.8 Flash promotional rates through 2026-12-31; GPT-6 Astra launch).",
             "Configurable promotional and period discounts can be defined in config.json under 'discounts' with optional model, date/month filters.",
             "Monthly usage rollups are available via by_month in the generated summary.",

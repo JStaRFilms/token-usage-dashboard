@@ -69,6 +69,7 @@ class RefreshUsageTests(unittest.TestCase):
 
     def test_gpt_6_sol_and_luna_standard_and_long_context_rates(self):
         for model, short_rates, long_rates in (
+            ("gpt-6.1-sol", (2.0, 0.1, 2.5, 10.0), (4.0, 0.2, 5.0, 15.0)),
             ("gpt-6-sol", (2.0, 0.2, 2.5, 10.0), (4.0, 0.4, 5.0, 15.0)),
             ("gpt-6-luna", (0.1, 0.01, 0.125, 0.5), (0.2, 0.02, 0.25, 0.75)),
         ):
@@ -142,6 +143,37 @@ class RefreshUsageTests(unittest.TestCase):
         self.assertEqual(std_price["input_rate"], 1.50)
         self.assertEqual(std_price["output_rate"], 7.50)
         self.assertAlmostEqual(std_cost, 9.00)
+
+    def test_new_public_rates_and_observed_aliases(self):
+        for model, canonical, rates in (
+            ("ar-gpt-6-astra", "gpt-6-astra", (10.0, 1.0, 50.0)),
+            ("ar-gpt-6.1-sol", "gpt-6.1-sol", (2.0, 0.1, 10.0)),
+            ("ar-glm-5.3", "glm-5.3", (1.4, 0.26, 4.4)),
+            ("z-ai/glm-5.3", "glm-5.3", (1.4, 0.26, 4.4)),
+            ("ar-claude-opus-5", "claude-opus-5", (5.0, 0.5, 25.0)),
+            ("anthropic/claude-opus-4.6", "claude-opus-4-6", (5.0, 0.5, 25.0)),
+            ("claude-opus-4-6-thinking", "claude-opus-4-6", (5.0, 0.5, 25.0)),
+        ):
+            with self.subTest(model=model):
+                cost, price = refresh_usage.calc_cost(
+                    model, 1_000_000, 100_000, 10_000, False, "2026-10-15T00:00:00Z",
+                    cache_write_tokens=1_000,
+                )
+                self.assertEqual(price["priced_as"], canonical)
+                self.assertEqual(
+                    tuple(price[k] for k in ("input_rate", "cached_rate", "output_rate")), rates,
+                )
+                write_cost = 1_000 * rates[0] * 1.25 / 1_000_000 if canonical in (
+                    "gpt-6.1-sol", "claude-opus-5", "claude-opus-4-6",
+                ) else 0.0
+                self.assertAlmostEqual(cost, rates[0] + rates[1] * 0.1 + rates[2] * 0.01 + write_cost)
+
+    def test_unverified_internal_models_remain_unpriced(self):
+        for model in ("codex-auto-review", "gemini-flash-safety-le2", "gemini-hyperthought", "unknown"):
+            with self.subTest(model=model):
+                cost, price = refresh_usage.calc_cost(model, 1_000, 0, 100, True, "2026-10-15")
+                self.assertIsNone(cost)
+                self.assertFalse(price["known"])
 
     def test_discount_by_month_and_model(self):
         discounts = [
